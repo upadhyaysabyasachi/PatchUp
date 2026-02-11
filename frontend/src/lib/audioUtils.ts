@@ -1,14 +1,26 @@
 "use client";
 
+// Reuse a single AudioContext to avoid exhausting the browser limit (~6 concurrent)
+let _sharedCtx: AudioContext | null = null;
+
+function getAudioContext(): AudioContext {
+  if (!_sharedCtx || _sharedCtx.state === "closed") {
+    _sharedCtx = new AudioContext();
+  }
+  return _sharedCtx;
+}
+
 /**
  * Convert WebM/Opus recording blob to WAV so Sarvam STT accepts it.
  * Uses Web Audio API to decode then writes a simple WAV header + PCM.
  */
 export async function webmToWav(blob: Blob): Promise<Blob> {
   const arrayBuffer = await blob.arrayBuffer();
-  const audioContext = new AudioContext();
-  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-  audioContext.close();
+  const ctx = getAudioContext();
+
+  // decodeAudioData detaches the buffer, so we must pass a copy
+  const copy = arrayBuffer.slice(0);
+  const audioBuffer = await ctx.decodeAudioData(copy);
 
   // Sarvam works best with 16kHz; resample if we have a higher rate
   const targetSampleRate = 16000;

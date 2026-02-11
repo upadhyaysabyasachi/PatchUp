@@ -1,0 +1,11 @@
+# Copy to backend/pyproject.toml if that file is missing (e.g. after clone).
+# Backend runs with: pip install -r requirements.txt && uvicorn main:app
+[project]
+name = "patchup-api"
+version = "0.1.0"
+description = "PatchUp FastAPI backend"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
