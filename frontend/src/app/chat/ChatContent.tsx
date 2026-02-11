@@ -2,7 +2,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { sendVoiceResponse, sendTextResponse, playBase64Audio, endSession } from "@/lib/api";
-import { webmToWav } from "@/lib/audioUtils";
 import type { SessionStartResponse, RespondResponse } from "@/lib/api";
 import { useAudioRecorder } from "@/hooks/useAudioRecorder";
 import PatchMeter from "@/components/PatchMeter";
@@ -79,16 +78,7 @@ export default function ChatContent() {
         setVoiceError("Recording was empty. Hold the mic longer or use \"Switch to Text\".");
         return;
       }
-      let audioToSend = blob;
-      if (blob.type.includes("webm")) {
-        try {
-          audioToSend = await webmToWav(blob);
-        } catch (convertErr) {
-          setVoiceError("Could not process recording. Try again or use \"Switch to Text\".");
-          return;
-        }
-      }
-      const d = await sendVoiceResponse(sessionId, audioToSend);
+      const d = await sendVoiceResponse(sessionId, blob);
       await handleResp(d);
     } catch (e) {
       console.error(e);
