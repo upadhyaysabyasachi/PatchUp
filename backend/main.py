@@ -356,6 +356,14 @@ async def sarvam_llm(messages: list, temperature: float = 0.7) -> str:
         return resp.json()["choices"][0]["message"]["content"]
 
 
+def _fix_json_quirks(text: str) -> str:
+    """Fix common LLM JSON quirks that break json.loads."""
+    import re
+    # Remove +N number prefixes (e.g. +2 → 2, +12 → 12) that are invalid JSON
+    text = re.sub(r':\s*\+(\d)', r': \1', text)
+    return text
+
+
 def parse_llm_json(raw: str) -> dict:
     """Robustly parse JSON from LLM response, handling markdown fences."""
     text = raw.strip()
@@ -366,6 +374,7 @@ def parse_llm_json(raw: str) -> dict:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines).strip()
+    text = _fix_json_quirks(text)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
