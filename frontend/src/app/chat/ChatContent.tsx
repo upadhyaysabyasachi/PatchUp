@@ -2,7 +2,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { sendVoiceResponse, sendTextResponse, playBase64Audio, endSession } from "@/lib/api";
-import { webmToWav } from "@/lib/audioUtils";
 import type { SessionStartResponse, RespondResponse } from "@/lib/api";
 import { useAudioRecorder } from "@/hooks/useAudioRecorder";
 import PatchMeter from "@/components/PatchMeter";
@@ -62,13 +61,7 @@ export default function ChatContent() {
     }
   }, [sessionId, router]);
 
-  const onMicPress = async () => {
-    if (processing || playing || status !== "ongoing") return;
-    try { await startRecording(); } catch { setTextMode(true); }
-  };
-
-  const onMicRelease = useCallback(async () => {
-    if (!isRecording) return;
+  const sendRecording = useCallback(async () => {
     setProcessing(true);
     setVoiceError(null);
     setSendError(null);
@@ -76,11 +69,10 @@ export default function ChatContent() {
       const blob = await stopRecording();
       if (!sessionId) return;
       if (blob.size === 0) {
-        setVoiceError("Recording was empty. Hold the mic longer or use \"Switch to Text\".");
+        setVoiceError("Recording was empty. Tap the mic and speak, then tap again to send.");
         return;
       }
-      const audioToSend = blob.type.includes("webm") ? await webmToWav(blob) : blob;
-      const d = await sendVoiceResponse(sessionId, audioToSend);
+      const d = await sendVoiceResponse(sessionId, blob);
       await handleResp(d);
     } catch (e) {
       console.error(e);
@@ -92,10 +84,21 @@ export default function ChatContent() {
     } finally {
       setProcessing(false);
     }
-  }, [isRecording, sessionId, stopRecording, handleResp]);
+  }, [sessionId, stopRecording, handleResp]);
 
-  // Keep ref in sync so the auto-stop timer can call onMicRelease
-  autoStopRef.current = onMicRelease;
+  // Keep ref in sync so the auto-stop timer can call sendRecording
+  autoStopRef.current = sendRecording;
+
+  const onMicTap = useCallback(async () => {
+    if (processing || playing || status !== "ongoing") return;
+    if (isRecording) {
+      // Stop recording and send
+      await sendRecording();
+    } else {
+      // Start recording
+      try { await startRecording(); } catch { setTextMode(true); }
+    }
+  }, [processing, playing, status, isRecording, sendRecording, startRecording]);
 
   const onTextSend = async () => {
     if (!textIn.trim() || !sessionId || processing || status !== "ongoing") return;
@@ -193,7 +196,7 @@ export default function ChatContent() {
           ) : (
             <div className="flex justify-center">
               <MicButton isRecording={isRecording} isProcessing={processing} isPlaying={playing}
-                disabled={status !== "ongoing"} onPress={onMicPress} onRelease={onMicRelease} />
+                disabled={status !== "ongoing"} onTap={onMicTap} />
             </div>
           )}
           <div className="text-center mt-2"><span className="text-[10px] text-patch-soft/20">Turn {turn + 1}</span></div>
