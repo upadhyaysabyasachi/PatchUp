@@ -12,13 +12,24 @@ export interface SessionStartResponse {
   initial_score: number; persona_name: string; scenario_title: string; difficulty_name: string;
 }
 export interface RespondResponse {
-  user_text: string; girlfriend_text: string; girlfriend_audio: string;
+  user_text: string; counterpart_text: string; counterpart_audio: string;
   score_delta: number; current_score: number; emotion: string;
   status: "ongoing" | "patched_up" | "blocked"; turn_number: number;
 }
 export interface SessionEndResponse {
   final_score: number; verdict: string; total_turns: number;
   best_response: string | null; worst_response: string | null; tips: string[];
+}
+
+// Accept either backend version while independent deployments roll out.
+function normalizeResponse(data: RespondResponse & {
+  girlfriend_text?: string; girlfriend_audio?: string;
+}): RespondResponse {
+  return {
+    ...data,
+    counterpart_text: data.counterpart_text ?? data.girlfriend_text ?? "",
+    counterpart_audio: data.counterpart_audio ?? data.girlfriend_audio ?? "",
+  };
 }
 
 export async function startSession(params: {
@@ -56,7 +67,7 @@ export async function sendVoiceResponse(sessionId: string, audioBlob: Blob): Pro
       }
       throw new Error(msg);
     }
-    return res.json();
+    return normalizeResponse(await res.json());
   } catch (e) {
     clearTimeout(timeoutId);
     if (e instanceof Error) {
@@ -85,7 +96,7 @@ export async function sendTextResponse(sessionId: string, text: string): Promise
       }
       throw new Error(msg);
     }
-    return res.json();
+    return normalizeResponse(await res.json());
   } catch (e) {
     if (e instanceof Error && (e.message === "Failed to fetch" || e.cause?.toString?.().includes("fetch")))
       throw new Error(`Cannot reach the backend at ${API_URL}. Is it running?`);

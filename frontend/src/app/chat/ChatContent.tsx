@@ -8,7 +8,7 @@ import PatchMeter from "@/components/PatchMeter";
 import MicButton from "@/components/MicButton";
 import ChatBubble from "@/components/ChatBubble";
 
-interface Msg { role: "girlfriend"|"boyfriend"; text: string; emotion?: string; scoreDelta?: number; audio?: string; }
+interface Msg { role: "counterpart"|"user"; text: string; emotion?: string; scoreDelta?: number; audio?: string; }
 const P_EMOJI: Record<string,string> = { Priya:"🎬", Neha:"🧊", Ritu:"🧠", Kavya:"🌪️" };
 
 export default function ChatContent() {
@@ -36,7 +36,7 @@ export default function ChatContent() {
     if (!s) { router.push("/setup"); return; }
     const p: SessionStartResponse = JSON.parse(s);
     setSession(p); setScore(p.initial_score);
-    setMsgs([{ role:"girlfriend", text:p.opening_message, emotion:"angry", audio:p.opening_audio }]);
+    setMsgs([{ role:"counterpart", text:p.opening_message, emotion:"angry", audio:p.opening_audio }]);
     if (p.opening_audio) {
       setPlaying(true);
       playBase64Audio(p.opening_audio).catch(()=>{}).finally(() => setPlaying(false));
@@ -46,13 +46,13 @@ export default function ChatContent() {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior:"smooth" }); }, [msgs]);
 
   const handleResp = useCallback(async (d: RespondResponse) => {
-    setMsgs(p => [...p, { role:"boyfriend", text:d.user_text }]);
+    setMsgs(p => [...p, { role:"user", text:d.user_text }]);
     await new Promise(r => setTimeout(r, 300));
-    setMsgs(p => [...p, { role:"girlfriend", text:d.girlfriend_text, emotion:d.emotion, scoreDelta:d.score_delta, audio:d.girlfriend_audio }]);
+    setMsgs(p => [...p, { role:"counterpart", text:d.counterpart_text, emotion:d.emotion, scoreDelta:d.score_delta, audio:d.counterpart_audio }]);
     setScore(d.current_score); setLastDelta(d.score_delta); setEmotion(d.emotion); setStatus(d.status); setTurn(d.turn_number);
-    if (d.girlfriend_audio) {
+    if (d.counterpart_audio) {
       setPlaying(true);
-      try { await playBase64Audio(d.girlfriend_audio); } catch {}
+      try { await playBase64Audio(d.counterpart_audio); } catch {}
       setPlaying(false);
     }
     if (d.status !== "ongoing") {
@@ -150,7 +150,7 @@ export default function ChatContent() {
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
         {msgs.map((m, i) => (
           <ChatBubble key={i} role={m.role} text={m.text} emotion={m.emotion} scoreDelta={m.scoreDelta} audio={m.audio}
-            personaName={m.role === "girlfriend" ? session.persona_name : undefined} />
+            personaName={m.role === "counterpart" ? session.persona_name : undefined} />
         ))}
         {status === "patched_up" && (
           <div className="text-center py-6 animate-slide-up">

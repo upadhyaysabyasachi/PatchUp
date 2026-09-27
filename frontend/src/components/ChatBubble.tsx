@@ -8,11 +8,11 @@ const EMOTION_EMOJIS: Record<string, string> = {
 };
 
 export default function ChatBubble({ role, text, emotion, scoreDelta, audio, personaName }: {
-  role: "girlfriend" | "boyfriend"; text: string; emotion?: string;
+  role: "counterpart" | "user"; text: string; emotion?: string;
   scoreDelta?: number; audio?: string; personaName?: string;
 }) {
   const [playing, setPlaying] = useState(false);
-  const isGF = role === "girlfriend";
+  const isCounterpart = role === "counterpart";
 
   const replay = async () => {
     if (!audio || playing) return;
@@ -22,21 +22,21 @@ export default function ChatBubble({ role, text, emotion, scoreDelta, audio, per
   };
 
   return (
-    <div className={`flex gap-2.5 animate-slide-up ${isGF ? "justify-start" : "justify-end"}`}>
-      {isGF && (
+    <div className={`flex gap-2.5 animate-slide-up ${isCounterpart ? "justify-start" : "justify-end"}`}>
+      {isCounterpart && (
         <div className="flex-shrink-0 w-8 h-8 rounded-full bg-patch-accent/20 border border-patch-accent/30 flex items-center justify-center text-sm">
           {emotion ? EMOTION_EMOJIS[emotion] || "😐" : "👩"}
         </div>
       )}
       <div className={`max-w-[75%] rounded-2xl px-4 py-3 ${
-        isGF ? "bg-patch-card border border-patch-border rounded-tl-sm"
+        isCounterpart ? "bg-patch-card border border-patch-border rounded-tl-sm"
              : "bg-patch-accent/20 border border-patch-accent/30 rounded-tr-sm"}`}>
-        {isGF && personaName && (
+        {isCounterpart && personaName && (
           <div className="text-[10px] text-patch-glow/50 font-medium mb-1 uppercase tracking-wider">{personaName}</div>
         )}
         <p className="text-sm text-patch-soft leading-relaxed">{text}</p>
         <div className="flex items-center justify-between mt-1.5 gap-3">
-          {isGF && audio && (
+          {isCounterpart && audio && (
             <button onClick={replay} disabled={playing}
               className="flex items-center gap-1 text-[10px] text-patch-glow/50 hover:text-patch-glow transition-colors">
               {playing ? (
@@ -47,14 +47,14 @@ export default function ChatBubble({ role, text, emotion, scoreDelta, audio, per
               <span>{playing ? "Playing" : "Replay"}</span>
             </button>
           )}
-          {isGF && scoreDelta !== undefined && scoreDelta !== 0 && (
+          {isCounterpart && scoreDelta !== undefined && scoreDelta !== 0 && (
             <span className={`text-[10px] font-mono font-bold ${scoreDelta > 0 ? "text-green-400" : "text-red-400"}`}>
               {scoreDelta > 0 ? `+${scoreDelta}` : scoreDelta}
             </span>
           )}
         </div>
       </div>
-      {!isGF && (
+      {!isCounterpart && (
         <div className="flex-shrink-0 w-8 h-8 rounded-full bg-patch-accent/10 border border-patch-accent/20 flex items-center justify-center text-sm">🙍‍♂️</div>
       )}
     </div>

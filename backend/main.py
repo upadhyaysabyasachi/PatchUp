@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 import httpx
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -360,12 +360,16 @@ def _fix_json_quirks(text: str) -> str:
     """Fix common LLM JSON quirks that break json.loads."""
     import re
     # Remove +N number prefixes (e.g. +2 → 2, +12 → 12) that are invalid JSON
-    text = re.sub(r':\s*\+(\d)', r': \1', text)
+    text = re.sub(
+        r'"(?:\\.|[^"\\])*"|(:\s*)\+(\d)',
+        lambda match: match.group(1) + match.group(2) if match.group(1) else match.group(0),
+        text,
+    )
     return text
 
 
-def parse_llm_json(raw: str) -> dict:
-    """Robustly parse JSON from LLM response, handling markdown fences."""
+def parse_json_payload(raw: str):
+    """Decode an object or array, including fenced or prose-wrapped JSON."""
     text = raw.strip()
     # Strip markdown code fences
     if text.startswith("```"):
@@ -374,19 +378,28 @@ def parse_llm_json(raw: str) -> dict:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines).strip()
-    text = _fix_json_quirks(text)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Try to find JSON object in the text
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
+        # Decode from the first container boundary so trailing prose is harmless.
+        starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+        if starts:
+            candidate = text[min(starts):]
             try:
-                return json.loads(text[start:end])
+                return json.JSONDecoder().raw_decode(candidate)[0]
             except json.JSONDecodeError:
-                pass
-    # Fallback
+                return json.JSONDecoder().raw_decode(_fix_json_quirks(candidate))[0]
+        raise
+
+
+def parse_llm_json(raw: str) -> dict:
+    """Actor responses must be objects; malformed output gets a safe fallback."""
+    try:
+        parsed = parse_json_payload(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except (ValueError, TypeError):
+        pass
     return {
         "response": raw[:200],
         "score_delta": 0,
@@ -394,6 +407,26 @@ def parse_llm_json(raw: str) -> dict:
         "should_end": False,
         "end_reason": None,
     }
+
+
+def parse_tips(raw: str) -> list[str]:
+    tips = parse_json_payload(raw)
+    if not isinstance(tips, list) or len(tips) < 3 or not all(
+        isinstance(tip, str) and tip.strip() for tip in tips
+    ):
+        raise ValueError("Expected at least three non-empty tips")
+    return [tip.strip() for tip in tips[:3]]
+
+
+def normalize_session(session: Optional[dict]) -> Optional[dict]:
+    """Read sessions created before neutral conversation roles were introduced."""
+    if session is None:
+        return None
+    roles = {"boyfriend": "user", "girlfriend": "counterpart"}
+    return {**session, "conversation": [
+        {**turn, "role": roles.get(turn["role"], turn["role"])}
+        for turn in session["conversation"]
+    ]}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -430,11 +463,11 @@ def db_get_session(session_id: str) -> Optional[dict]:
     if supabase and not _supabase_failed:
         try:
             result = supabase.table("sessions").select("*").eq("id", session_id).execute()
-            return result.data[0] if result.data else None
+            return normalize_session(result.data[0]) if result.data else None
         except (PostgrestAPIError, Exception) as e:
             _supabase_failed = True
             print(f"⚠️  Supabase error (falling back to in-memory): {e}")
-    return memory_sessions.get(session_id)
+    return normalize_session(memory_sessions.get(session_id))
 
 
 def db_update_session(session_id: str, updates: dict):
@@ -543,13 +576,24 @@ class SessionStartResponse(BaseModel):
 
 class RespondResponse(BaseModel):
     user_text: str
-    girlfriend_text: str
-    girlfriend_audio: str
+    counterpart_text: str
+    counterpart_audio: str
     score_delta: int
     current_score: int
     emotion: str
     status: str
     turn_number: int
+
+    # Keep cached clients working during the production rollout.
+    @computed_field
+    @property
+    def girlfriend_text(self) -> str:
+        return self.counterpart_text
+
+    @computed_field
+    @property
+    def girlfriend_audio(self) -> str:
+        return self.counterpart_audio
 
 class SessionEndResponse(BaseModel):
     final_score: int
@@ -578,17 +622,17 @@ async def process_user_message(session_id: str, user_text: str) -> RespondRespon
 
     # Build LLM messages
     # Sarvam-M requires first non-system message to be "user", so fold the
-    # girlfriend's opening line into the system prompt and start the
-    # conversation history from the first boyfriend (user) message.
-    opening_text = conversation[0]["text"] if conversation and conversation[0]["role"] == "girlfriend" else None
+    # counterpart's opening line into the system prompt and start the
+    # conversation history from the first user message.
+    opening_text = conversation[0]["text"] if conversation and conversation[0]["role"] == "counterpart" else None
     system_content = session["system_prompt"]
     if opening_text:
         system_content += f"\n\nYou already said this opening line: \"{opening_text}\""
     llm_messages = [{"role": "system", "content": system_content}]
     for turn in conversation:
-        if turn is conversation[0] and turn["role"] == "girlfriend":
+        if turn is conversation[0] and turn["role"] == "counterpart":
             continue  # skip opening line, already in system prompt
-        if turn["role"] == "girlfriend":
+        if turn["role"] == "counterpart":
             llm_messages.append({"role": "assistant", "content": turn["text"]})
         else:
             llm_messages.append({"role": "user", "content": turn["text"]})
@@ -601,19 +645,24 @@ async def process_user_message(session_id: str, user_text: str) -> RespondRespon
     raw = await sarvam_llm(llm_messages, temperature=0.7)
     parsed = parse_llm_json(raw)
 
-    gf_text = parsed.get("response", "...")
-    score_delta = max(-25, min(25, int(parsed.get("score_delta", 0))))
+    counterpart_text = parsed.get("response", "...")
+    if not isinstance(counterpart_text, str) or not counterpart_text.strip():
+        counterpart_text = "..."
+    try:
+        score_delta = max(-25, min(25, int(parsed.get("score_delta", 0))))
+    except (ValueError, TypeError, OverflowError):
+        score_delta = 0
     emotion = parsed.get("emotion", "angry")
-    should_end = parsed.get("should_end", False)
-    end_reason = parsed.get("end_reason")
+    if not isinstance(emotion, str) or emotion not in EMOTION_VOICE_PARAMS:
+        emotion = "angry"
 
     # Update score
     new_score = max(0, min(100, session["current_score"] + score_delta))
 
     # Determine status
-    if should_end and end_reason == "patched_up" or new_score >= 95:
+    if new_score >= 90:
         status = "patched_up"
-    elif should_end and end_reason == "blocked" or new_score <= 0:
+    elif new_score <= 0:
         status = "blocked"
     else:
         status = "ongoing"
@@ -623,8 +672,8 @@ async def process_user_message(session_id: str, user_text: str) -> RespondRespon
     final_pace = (diff_config["tts_pace"] + emo_params["pace"]) / 2
     final_temp = (diff_config["tts_temperature"] + emo_params["temperature"]) / 2
 
-    gf_audio = await sarvam_tts(
-        text=gf_text,
+    counterpart_audio = await sarvam_tts(
+        text=counterpart_text,
         speaker=persona["voice_id"],
         language=session["language"],
         pace=final_pace,
@@ -632,10 +681,10 @@ async def process_user_message(session_id: str, user_text: str) -> RespondRespon
     )
 
     # Update conversation history
-    turn_number = len([t for t in conversation if t["role"] == "boyfriend"]) + 1
-    conversation.append({"role": "boyfriend", "text": user_text, "timestamp": datetime.now(timezone.utc).isoformat()})
+    turn_number = len([t for t in conversation if t["role"] == "user"]) + 1
+    conversation.append({"role": "user", "text": user_text, "timestamp": datetime.now(timezone.utc).isoformat()})
     conversation.append({
-        "role": "girlfriend", "text": gf_text, "emotion": emotion,
+        "role": "counterpart", "text": counterpart_text, "emotion": emotion,
         "score_delta": score_delta, "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
@@ -648,8 +697,8 @@ async def process_user_message(session_id: str, user_text: str) -> RespondRespon
 
     return RespondResponse(
         user_text=user_text,
-        girlfriend_text=gf_text,
-        girlfriend_audio=gf_audio,
+        counterpart_text=counterpart_text,
+        counterpart_audio=counterpart_audio,
         score_delta=score_delta,
         current_score=new_score,
         emotion=emotion,
@@ -750,7 +799,7 @@ async def start_session(req: SessionStartRequest):
         "current_score": diff["starting_score"],
         "status": "ongoing",
         "conversation": [
-            {"role": "girlfriend", "text": opening, "emotion": "angry", "score_delta": 0,
+            {"role": "counterpart", "text": opening, "emotion": "angry", "score_delta": 0,
              "timestamp": datetime.now(timezone.utc).isoformat()},
         ],
         "system_prompt": build_system_prompt(req.persona_id, req.scenario_id, req.difficulty, req.language),
@@ -806,20 +855,23 @@ async def end_session_endpoint(session_id: str):
 
     if session["status"] == "ongoing":
         db_update_session(session_id, {"status": "quit"})
+        session["status"] = "quit"
 
     conversation = session["conversation"]
-    bf_turns = [t for t in conversation if t["role"] == "boyfriend"]
-    gf_turns = [t for t in conversation if t["role"] == "girlfriend" and "score_delta" in t]
+    user_turns = [t for t in conversation if t["role"] == "user"]
+    counterpart_turns = [t for i, t in enumerate(conversation)
+                         if t["role"] == "counterpart" and "score_delta" in t
+                         and i > 0 and conversation[i - 1]["role"] == "user"]
 
     best_resp = worst_resp = None
-    if gf_turns:
-        best_gf = max(gf_turns, key=lambda t: t.get("score_delta", 0))
-        worst_gf = min(gf_turns, key=lambda t: t.get("score_delta", 0))
-        best_idx = conversation.index(best_gf)
-        worst_idx = conversation.index(worst_gf)
-        if best_idx > 0 and conversation[best_idx - 1]["role"] == "boyfriend":
+    if counterpart_turns:
+        best_counterpart = max(counterpart_turns, key=lambda t: t.get("score_delta", 0))
+        worst_counterpart = min(counterpart_turns, key=lambda t: t.get("score_delta", 0))
+        best_idx = conversation.index(best_counterpart)
+        worst_idx = conversation.index(worst_counterpart)
+        if best_idx > 0 and conversation[best_idx - 1]["role"] == "user":
             best_resp = conversation[best_idx - 1]["text"]
-        if worst_idx > 0 and conversation[worst_idx - 1]["role"] == "boyfriend":
+        if worst_idx > 0 and conversation[worst_idx - 1]["role"] == "user":
             worst_resp = conversation[worst_idx - 1]["text"]
 
     score = session["current_score"]
@@ -832,13 +884,11 @@ async def end_session_endpoint(session_id: str):
     # Generate tips
     try:
         tips_raw = await sarvam_llm([{"role": "user", "content": (
-            f"A boyfriend tried to patch up after: {SCENARIOS[session['scenario_id']]['description']}. "
-            f"His responses were: {[t['text'] for t in bf_turns]}. Score: {score}/100. "
-            f"Give 3 short tips (one sentence each) on what he could do better. Reply as JSON array: [\"tip1\",\"tip2\",\"tip3\"]"
+            f"A user rehearsed a conversation after: {SCENARIOS[session['scenario_id']]['description']}. "
+            f"Their responses were: {[t['text'] for t in user_turns]}. Score: {score}/100. "
+            f"Give 3 short tips (one sentence each) on what the user could do better. Reply as JSON array: [\"tip1\",\"tip2\",\"tip3\"]"
         )}], temperature=0.5)
-        tips = json.loads(parse_llm_json(tips_raw).get("response", "[]")) if isinstance(parse_llm_json(tips_raw), dict) else json.loads(tips_raw.strip().strip("`").replace("json\n", "").strip())
-        if not isinstance(tips, list):
-            raise ValueError
+        tips = parse_tips(tips_raw)
     except Exception:
         tips = [
             "Acknowledge her feelings before explaining yourself",
@@ -848,9 +898,9 @@ async def end_session_endpoint(session_id: str):
 
     # Record stats
     db_record_stats(session_id, session["persona_id"], session["scenario_id"],
-                    session["difficulty"], score, session["status"], len(bf_turns))
+                    session["difficulty"], score, session["status"], len(user_turns))
 
     return SessionEndResponse(
-        final_score=score, verdict=verdict, total_turns=len(bf_turns),
+        final_score=score, verdict=verdict, total_turns=len(user_turns),
         best_response=best_resp, worst_response=worst_resp, tips=tips[:3],
     )

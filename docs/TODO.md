@@ -13,7 +13,7 @@ feedback, telling parents about a career change, ending a relationship, letting 
 - Supabase with in-memory fallback
 
 **Gaps vs. the goal:**
-- Roles are hard-coded as `"boyfriend"` / `"girlfriend"` in conversation data, stats and prompts
+- Conversation roles now use `user` / `counterpart`; existing comedy preset prompts remain
 - Scenarios and personas are fixed comedy bits with canned opening lines (`SCENARIOS`, `PERSONAS`)
 - The in-character LLM also judges the user — a single "forgiveness" score conflates the
   counterpart's emotional state with the user's communication skill
@@ -24,6 +24,7 @@ feedback, telling parents about a career change, ending a relationship, letting 
 ## Milestone 1 — Bring your own scenario (highest leverage)
 
 - [ ] Rename roles to `user` / `counterpart` across backend, DB and frontend
+      Code and legacy-session compatibility implemented; production data migration pending.
 - [ ] Scenario intake form: who is the other person (manager, parent, co-founder, partner, report)?
       What outcome do you need? What are you afraid they'll say? Relationship history / their usual style?
 - [ ] `POST /api/scenario/build` — LLM turns intake into a counterpart brief with hidden
@@ -42,7 +43,7 @@ feedback, telling parents about a career change, ending a relationship, letting 
   - Negotiation: clarity of ask, anchoring, objection handling
   - Feedback delivery: specificity, behaviour vs. person, next steps
 - [ ] Multi-dimensional score in the UI instead of a single meter
-- [ ] Fix end-threshold mismatch: prompt says ≥90, backend uses `>= 95`
+- [x] Fix end-threshold mismatch: prompt says ≥90, backend now uses `>= 90`
       (`process_user_message`), verdict uses ≥90
 
 ## Milestone 3 — Rehearsal loop (feedback & replay)
@@ -72,7 +73,8 @@ feedback, telling parents about a career change, ending a relationship, letting 
 
 - [ ] `_supabase_failed` never resets — one transient error silently moves the whole process
       to in-memory storage. Add retry / reset.
-- [ ] Tips parsing in `end_session_endpoint` is fragile and calls `parse_llm_json` twice;
-      likely falls back to the hard-coded tips often
+- [x] Parse debrief tips as a validated JSON array, including fenced/wrapped output
 - [ ] Mayura (Translate) is listed in CLAUDE.md / PRD but never called
-- [ ] No tests — start with `parse_llm_json` against malformed LLM output
+- [x] Add offline regression tests for malformed LLM output, tips, score thresholds,
+      legacy roles, response compatibility and debrief statistics
+      (`python -m unittest discover -s backend -v`; 9 tests)
