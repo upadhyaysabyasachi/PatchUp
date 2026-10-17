@@ -79,6 +79,15 @@ Without Supabase, the app works with in-memory storage (sessions are lost on res
 2. Add **Environment Variable**: `NEXT_PUBLIC_API_URL` = your Render backend URL.
 3. Deploy.
 
+**Current deployments**
+
+| | Production (`main`) | Staging (`feature/rehearsal-simulator`) |
+|---|---|---|
+| Backend (Render) | `patchup.onrender.com` | `patchup-api-rehearsal.onrender.com` ([env vars](https://dashboard.render.com/web/srv-db9m037btjjs73c7ljsg/env)) |
+| Frontend (Vercel project `patchup`) | `patchup-eight.vercel.app` | `patchup-git-feature-rehear-e197ee-sabyasachi-upadhyays-projects.vercel.app` |
+
+Both auto-deploy on push to their branch. Render free tier sleeps after 15 min idle; the first request takes up to a minute. Secrets (`SARVAM_API_KEY`, `TYPESAFE_API_KEY`) are set in the Render dashboard only, never in the repo.
+
 ---
 
 ## ✨ Features
