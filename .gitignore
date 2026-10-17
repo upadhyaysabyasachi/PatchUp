@@ -32,3 +32,7 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Vercel CLI link
+.vercel
+.env*
