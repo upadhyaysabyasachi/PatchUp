@@ -11,7 +11,7 @@ import ChatBubble from "@/components/ChatBubble";
 
 interface Msg {
   role: "counterpart" | "user"; text: string; emotion?: string; scoreDelta?: number;
-  audio?: string; turnNumber?: number; coach?: CoachNote | null;
+  audio?: string; audioMime?: string; turnNumber?: number; coach?: CoachNote | null;
 }
 
 const fromTurn = (t: Turn): Msg => ({
@@ -36,6 +36,7 @@ export default function ChatContent() {
   const [textMode, setTextMode] = useState(false);
   const [turn, setTurn] = useState(0);
   const [judgedBy, setJudgedBy] = useState<string | null>(null);
+  const [voiceProvider, setVoiceProvider] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const autoStopRef = useRef<() => void>(() => {});
@@ -48,10 +49,11 @@ export default function ChatContent() {
     if (p.session_id !== sessionId) { router.push("/setup"); return; }
     setSession(p); setScore(p.initial_score); setCpState(p.counterpart_state);
     setEmotion(p.kind === "classic" ? "angry" : "neutral");
-    setMsgs([{ role: "counterpart", text: p.opening_message, emotion: p.kind === "classic" ? "angry" : "neutral", audio: p.opening_audio }]);
+    setMsgs([{ role: "counterpart", text: p.opening_message, emotion: p.kind === "classic" ? "angry" : "neutral", audio: p.opening_audio, audioMime: p.audio_mime }]);
+    setVoiceProvider(p.voice_provider ?? null);
     if (p.opening_audio) {
       setPlaying(true);
-      playBase64Audio(p.opening_audio).catch(() => {}).finally(() => setPlaying(false));
+      playBase64Audio(p.opening_audio, p.audio_mime).catch(() => {}).finally(() => setPlaying(false));
     }
   }, [router, sessionId]);
 
@@ -67,12 +69,13 @@ export default function ChatContent() {
   const handleResp = useCallback(async (d: RespondResponse) => {
     setMsgs(p => [...p, { role: "user", text: d.user_text, turnNumber: d.turn_number, coach: d.coach }]);
     await new Promise(r => setTimeout(r, 300));
-    setMsgs(p => [...p, { role: "counterpart", text: d.counterpart_text, emotion: d.emotion, scoreDelta: d.score_delta, audio: d.counterpart_audio }]);
+    setMsgs(p => [...p, { role: "counterpart", text: d.counterpart_text, emotion: d.emotion, scoreDelta: d.score_delta, audio: d.counterpart_audio, audioMime: d.audio_mime }]);
     setScore(d.current_score); setLastDelta(d.score_delta); setEmotion(d.emotion); setStatus(d.status);
     setTurn(d.turn_number); setSkill(d.skill_scores); setCpState(d.counterpart_state); setJudgedBy(d.judged_by ?? null);
+    setVoiceProvider(d.voice_provider ?? null);
     if (d.counterpart_audio) {
       setPlaying(true);
-      try { await playBase64Audio(d.counterpart_audio); } catch {}
+      try { await playBase64Audio(d.counterpart_audio, d.audio_mime); } catch {}
       setPlaying(false);
     }
   }, []);
@@ -184,7 +187,7 @@ export default function ChatContent() {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
         {msgs.map((m, i) => (
-          <ChatBubble key={`${i}-${m.turnNumber ?? "c"}`} role={m.role} text={m.text} emotion={m.emotion} scoreDelta={m.scoreDelta} audio={m.audio}
+          <ChatBubble key={`${i}-${m.turnNumber ?? "c"}`} role={m.role} text={m.text} emotion={m.emotion} scoreDelta={m.scoreDelta} audio={m.audio} audioMime={m.audioMime}
             personaName={m.role === "counterpart" ? session.counterpart_name : undefined}
             coach={m.coach} turnNumber={m.turnNumber} onRetry={onRetry} canRetry={!processing && !playing} />
         ))}
@@ -253,6 +256,11 @@ export default function ChatContent() {
             {judgedBy && (
               <span className="text-[10px] text-patch-soft/20" title={judgedBy === "jev" ? "Movement and scores judged by TypeSafe Jev" : "Movement self-reported by the actor; scores by the coach LLM"}>
                 judged by {judgedBy === "jev" ? "Jev" : "the actor"}
+              </span>
+            )}
+            {voiceProvider && (
+              <span className="text-[10px] text-patch-soft/20" title={voiceProvider === "elevenlabs" ? "Voice by ElevenLabs" : "Voice by Sarvam Bulbul (fallback or configured)"}>
+                voice {voiceProvider === "elevenlabs" ? "ElevenLabs" : "Sarvam"}
               </span>
             )}
           </div>

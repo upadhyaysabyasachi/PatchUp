@@ -10,14 +10,23 @@ The original *convince your angry girlfriend* game is still here as **Classic** 
 
 ---
 
-## 🎯 Sarvam APIs Used (Full Sarvam Stack)
+## 🎯 Voice: ElevenLabs, with Sarvam as fallback
+
+| | Primary | Fallback |
+|---|---|---|
+| **Text-to-Speech** | **ElevenLabs Eleven v3** — the counterpart's emotion becomes a delivery tag (`[angry]`, `[crying]`, `[coldly]`…); 70+ languages; voice picked per counterpart from your account's voices (Indian accents first) | Sarvam **Bulbul V3** — pace/temperature follow emotion and defensiveness |
+| **Speech-to-Text** | **ElevenLabs Scribe v2** | Sarvam **Saarika v2.5** |
+
+Set `ELEVENLABS_API_KEY` to turn ElevenLabs on. Any ElevenLabs failure falls back to Sarvam for that call; `TTS_PROVIDER=sarvam` / `STT_PROVIDER=sarvam` switch back entirely. Each turn reports which provider spoke (`voice_provider`) and the audio format (`audio_mime`).
+
+## 🧠 Sarvam APIs
 
 | API | Model | Purpose |
 |-----|-------|---------|
-| **Text-to-Speech** | **Bulbul V3** ⭐ | The counterpart's voice — pace/temperature follow emotion and defensiveness; 30+ voices picked per counterpart |
-| **Speech-to-Text** | Saarika v2.5 | Transcribing your voice input |
-| **Chat Completion** | Sarvam-M | Three roles: the **actor** (plays the counterpart), the **coach** (scores your turn), the **scenario builder** (intake → brief) |
+| **Chat Completion** | Sarvam-M | Three roles: the **actor** (plays the counterpart), the **coach** (writes the note), the **scenario builder** (intake → brief) |
 | **Translate** | Mayura v1 | Says the counterpart's opening line in your chosen language (code-mixed Hinglish for Hindi); translates native-script turns for the judge |
+| **Text-to-Speech** | Bulbul V3 | Voice fallback (or primary with `TTS_PROVIDER=sarvam`) |
+| **Speech-to-Text** | Saarika v2.5 | Transcription fallback (or primary with `STT_PROVIDER=sarvam`) |
 
 ### Judgement: TypeSafe Jev
 
@@ -70,7 +79,7 @@ Without Supabase, the app works with in-memory storage (sessions are lost on res
 
 1. Push this repo and connect it to [Render](https://render.com) as a new **Web Service**.
 2. Render will use the root [render.yaml](render.yaml): root = `backend`, build = `pip install -r requirements.txt`, start = `uvicorn main:app --host 0.0.0.0 --port $PORT`.
-3. Add **Environment** variables: `SARVAM_API_KEY` (required), `ALLOWED_ORIGINS` = your Vercel URL, `TYPESAFE_API_KEY` for Jev judgement. Optionally `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` for persistence.
+3. Add **Environment** variables: `SARVAM_API_KEY` (required), `ELEVENLABS_API_KEY` for the primary voice, `ALLOWED_ORIGINS` = your Vercel URL, `TYPESAFE_API_KEY` for Jev judgement. Optionally `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` for persistence.
 4. Deploy and copy the backend URL (e.g. `https://patchup-api.onrender.com`).
 
 **Frontend (Vercel)**
@@ -86,7 +95,7 @@ Without Supabase, the app works with in-memory storage (sessions are lost on res
 | Backend (Render) | `patchup.onrender.com` | `patchup-api-rehearsal.onrender.com` ([env vars](https://dashboard.render.com/web/srv-db9m037btjjs73c7ljsg/env)) |
 | Frontend (Vercel project `patchup`) | `patchup-eight.vercel.app` | `patchup-git-feature-rehear-e197ee-sabyasachi-upadhyays-projects.vercel.app` |
 
-Both auto-deploy on push to their branch. Render free tier sleeps after 15 min idle; the first request takes up to a minute. Secrets (`SARVAM_API_KEY`, `TYPESAFE_API_KEY`) are set in the Render dashboard only, never in the repo.
+Both auto-deploy on push to their branch. Render free tier sleeps after 15 min idle; the first request takes up to a minute. Secrets (`SARVAM_API_KEY`, `ELEVENLABS_API_KEY`, `TYPESAFE_API_KEY`) are set in the Render dashboard only, never in the repo.
 
 ---
 

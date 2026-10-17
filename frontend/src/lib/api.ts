@@ -56,6 +56,7 @@ export interface SessionStartResponse {
   kind: BriefKind; counterpart_name: string; counterpart_role: string; counterpart_emoji: string;
   scenario_title: string; difficulty_name: string; conversation_type: ConversationType;
   meter_label: string; dimensions: Dimension[]; goal: string; counterpart_state: CounterpartState;
+  audio_mime?: string; voice_provider?: string;
 }
 export interface RespondResponse {
   user_text: string; counterpart_text: string; counterpart_audio: string;
@@ -63,6 +64,7 @@ export interface RespondResponse {
   status: SessionStatus; turn_number: number;
   coach: CoachNote | null; skill_scores: Record<string, number>; counterpart_state: CounterpartState;
   judged_by?: "jev" | "actor";
+  audio_mime?: string; voice_provider?: string; stt_provider?: string | null;
 }
 export interface Turn {
   role: "user" | "counterpart"; text: string; emotion?: string; score_delta?: number;
@@ -170,11 +172,12 @@ export const endSession = (sessionId: string) =>
 export const deleteSession = (sessionId: string) =>
   request<{ deleted: boolean }>(`/api/session/${sessionId}`, { method: "DELETE" }, 15000);
 
-export function playBase64Audio(base64Audio: string): Promise<void> {
+// mime defaults to WAV (Sarvam); ElevenLabs returns MP3 and the backend says so in audio_mime.
+export function playBase64Audio(base64Audio: string, mime = "audio/wav"): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       const bytes = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
-      const blob = new Blob([bytes], { type: "audio/wav" });
+      const blob = new Blob([bytes], { type: mime });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audio.onended = () => { URL.revokeObjectURL(url); resolve(); };

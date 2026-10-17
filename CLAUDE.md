@@ -37,6 +37,7 @@ App works with in-memory storage when Supabase is not configured. Fresh project:
 - `prompts.py` — actor, coach, scenario-builder and debrief prompt builders. Sarvam-M needs the first non-system message to be from the user, so the opening line is folded into the system prompt.
 - `parsing.py` — LLM-output parsers that never raise on bad output (`parse_actor` falls back, `parse_coach` / `parse_brief` return None) plus `brief_from_data` for client-supplied briefs. Only `parse_tips` raises.
 - `sarvam.py` — `sarvam_stt`, `sarvam_tts`, `sarvam_llm(messages, temperature, max_tokens)`, `sarvam_translate`.
+- `elevenlabs.py` — `elevenlabs_tts` (Eleven v3 by default; the counterpart's `emotion` becomes a v3 audio tag like `[angry]`, and `pace`/`temperature` map to `voice_settings`), `elevenlabs_stt` (Scribe v2), `pick_elevenlabs_voice` (account voices by gender, Indian accents first, env override, premade defaults). Returns MP3. Raises on failure; `main.speak()` / `main.transcribe()` own the fallback to Sarvam.
 - `typesafe.py` — TypeSafe Jev via `POST https://api.typesafe.ai/v1/systemone` (httpx, no SDK). `judge_turn()` asks 6 Score questions in one request (movement, trust, defensiveness + the rubric's 3 dimensions) and maps expected levels to deltas / 0-10 in code; `judge_intake()` asks 2 Nouls (abuse, self-harm; flagged at ≥ `SAFETY_THRESHOLD` 0.6) + 1 Choice (conversation type). `judge_enabled()` is just "is the key set". Level descriptions live in `content.py` (`RUBRICS[...]["dimensions"][dim]["levels"]`, `MOVEMENT_LEVELS`, `TRUST_LEVELS`, `DEFENSIVENESS_LEVELS`).
 - `db.py` — Supabase client with in-memory fallback. Any Supabase error opens a 60s circuit breaker; sessions created meanwhile live in `memory_sessions` and are always read from there first. `normalize_session` maps legacy `boyfriend`/`girlfriend` roles and fills missing rehearsal columns.
 
@@ -46,7 +47,10 @@ Every session is driven by a brief: `{kind: preset|custom|classic, conversation_
 ### One user turn: judge → actor + coach → TTS
 1. **Judge** (`judge_with_jev`). With a TypeSafe key: if the message is in a native Indic script, Mayura translates it to English first (Jev is English-first); then one Jev request returns movement/trust/defensiveness deltas and the 3 rubric scores. Positive movement is scaled by the difficulty's `gain_factor` (`apply_gain`); losses land in full. Code updates `current_score` / `counterpart_state` *before* the actor speaks. Without a key, or if Jev fails, this step is skipped and the actor self-reports (`judged_by: "actor"`).
 2. **Actor + coach** run concurrently (`asyncio.gather`, both Sarvam-M). The actor gets the already-updated state when Jev judged (`build_actor_messages(..., self_judging=False)`) and returns `{response, emotion}`; when self-judging, the prompt suffix also asks for the three deltas. The coach gets Jev's scores and only writes `{note, stronger}`; when self-judging it also returns `scores`. A coach failure never fails the turn.
-3. **TTS** of the actor's reply; pace/temperature = avg(difficulty, emotion) ± a defensiveness nudge.
+3. **TTS** of the actor's reply via `speak()`; pace/temperature = avg(difficulty, emotion) ± a defensiveness nudge.
+
+### Speech providers
+`TTS_PROVIDER` / `STT_PROVIDER` default to `elevenlabs` when `ELEVENLABS_API_KEY` is set, else `sarvam`. `speak()` tries ElevenLabs when it's the provider *and* `supports_language(model, language)` (v3 speaks all 9 UI languages; `eleven_multilingual_v2`/flash only `en`, `hi`, `ta`), then falls back to Sarvam Bulbul on any error. `transcribe()` does the same with Scribe → Saarika. Responses carry `audio_mime` (`audio/mpeg` from ElevenLabs, `audio/wav` from Sarvam — the frontend passes it to `playBase64Audio`) and `voice_provider` / `stt_provider`; `/api/health` reports the configured providers. Tests patch `main.elevenlabs_tts` / `main.elevenlabs_stt` / `main.pick_elevenlabs_voice` and set `main.TTS_PROVIDER`.
 
 `current_score` is the counterpart's **receptiveness** and drives the meter and end conditions (≥90 → `patched_up`, ≤0 → `blocked`; status names kept for compatibility). Coach output is stored on the user turn as `coach` (with `judged_by`); running averages in `skill_scores`. Stats are recorded exactly once: in `process_user_message` when the score resolves the session, else in `/end` when the user quits.
 
@@ -73,7 +77,8 @@ Counterpart turns: `{role, text, emotion, score_delta, state{receptiveness,trust
 ## Environment Variables
 
 ### Backend (`backend/.env`)
-- `SARVAM_API_KEY` — required
+- `SARVAM_API_KEY` — required (LLM, translation, and the speech fallback)
+- `ELEVENLABS_API_KEY` — optional; set = ElevenLabs is the primary voice (TTS + STT). `TTS_PROVIDER`/`STT_PROVIDER=sarvam|elevenlabs` force one; `ELEVENLABS_TTS_MODEL` (default `eleven_v3`), `ELEVENLABS_STT_MODEL` (`scribe_v2`), `ELEVENLABS_VOICE_IDS_FEMALE/MALE`, `ELEVENLABS_BASE_URL` tune it.
 - `TYPESAFE_API_KEY` — optional; set = Jev judges turns and intakes, blank = Sarvam-M self-judges. `/api/health` reports `judge`.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` — optional; blank = in-memory
 - `ALLOWED_ORIGINS` — comma-separated; defaults to `http://localhost:3000,http://127.0.0.1:3000`. Credentials are off.

@@ -63,6 +63,15 @@ feedback, telling parents about a career change, ending a relationship, letting 
 - [x] Run again: replay the same scenario and compare scores (`POST /session/{id}/restart`; `previous_score` in the debrief)
 - [ ] Supabase Auth — per-user history and progress over time
 
+## Voice providers
+
+- [x] ElevenLabs as the primary voice (`backend/elevenlabs.py`): Eleven v3 TTS with the counterpart's emotion
+      as an audio tag, Scribe v2 STT, voices picked from the account by gender. Sarvam Bulbul/Saarika remain
+      as per-call fallback and as the provider when `ELEVENLABS_API_KEY` is unset.
+- [ ] Measure v3 latency per turn in production; if it hurts, switch `ELEVENLABS_TTS_MODEL=eleven_v3_conversational`
+- [ ] Add a few Indian-accent voices to the ElevenLabs account (Voice Library) so `pick_elevenlabs_voice` has
+      accent-matched options; until then it uses the default premade voices
+
 ## Milestone 4 — Realism
 
 - [ ] Stream LLM output and start TTS on the first sentence to cut per-turn latency

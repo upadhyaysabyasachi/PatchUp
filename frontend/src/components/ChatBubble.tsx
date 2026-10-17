@@ -6,9 +6,9 @@ import { EMOTION_LABELS } from "./PatchMeter";
 
 const labelOf = (dim: string) => dim.replace(/_/g, " ");
 
-export default function ChatBubble({ role, text, emotion, scoreDelta, audio, personaName, coach, turnNumber, onRetry, canRetry }: {
+export default function ChatBubble({ role, text, emotion, scoreDelta, audio, audioMime, personaName, coach, turnNumber, onRetry, canRetry }: {
   role: "counterpart" | "user"; text: string; emotion?: string;
-  scoreDelta?: number; audio?: string; personaName?: string;
+  scoreDelta?: number; audio?: string; audioMime?: string; personaName?: string;
   coach?: CoachNote | null; turnNumber?: number;
   onRetry?: (turnNumber: number) => void; canRetry?: boolean;
 }) {
@@ -20,7 +20,7 @@ export default function ChatBubble({ role, text, emotion, scoreDelta, audio, per
   const replay = async () => {
     if (!audio || playing) return;
     setPlaying(true);
-    try { await playBase64Audio(audio); } catch (e) { console.error(e); }
+    try { await playBase64Audio(audio, audioMime); } catch (e) { console.error(e); }
     setPlaying(false);
   };
 

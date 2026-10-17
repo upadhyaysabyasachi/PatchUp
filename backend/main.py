@@ -5,6 +5,7 @@ prompts.py, LLM-output parsing in parsing.py, Sarvam calls in sarvam.py, TypeSaf
 judgements in typesafe.py, storage in db.py.
 """
 import asyncio
+import base64
 import logging
 import os
 import uuid
@@ -28,6 +29,10 @@ from content import (  # noqa: E402
 from db import (  # noqa: E402
     db_create_session, db_delete_session, db_get_session, db_leaderboard, db_record_stats,
     db_update_session,
+)
+from elevenlabs import (  # noqa: E402
+    ELEVENLABS_AUDIO_MIME, ELEVENLABS_TTS_MODEL, elevenlabs_enabled, elevenlabs_stt, elevenlabs_tts,
+    pick_elevenlabs_voice, supports_language,
 )
 from parsing import brief_from_data, clamp_int, parse_actor, parse_brief, parse_coach, parse_tips  # noqa: E402
 from prompts import (  # noqa: E402
@@ -60,6 +65,12 @@ app.add_middleware(
 
 LANGUAGE_IDS = {language["id"] for language in LANGUAGES}
 GOAL_SCORE = 90
+
+# Speech providers: ElevenLabs when a key is set, Sarvam otherwise. Either can be forced
+# with TTS_PROVIDER / STT_PROVIDER=sarvam|elevenlabs. ElevenLabs failures fall back to Sarvam per call.
+_default_provider = "elevenlabs" if elevenlabs_enabled() else "sarvam"
+TTS_PROVIDER = os.getenv("TTS_PROVIDER") or _default_provider
+STT_PROVIDER = os.getenv("STT_PROVIDER") or _default_provider
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -120,6 +131,8 @@ class SessionStartResponse(BaseModel):
     dimensions: list[dict]
     goal: str
     counterpart_state: dict
+    audio_mime: str = "audio/wav"
+    voice_provider: str = "sarvam"
 
     # Older frontend builds read this name.
     @computed_field
@@ -147,6 +160,9 @@ class RespondResponse(BaseModel):
     skill_scores: dict[str, float] = Field(default_factory=dict)
     counterpart_state: dict[str, int] = Field(default_factory=dict)
     judged_by: str = "actor"  # jev | actor
+    audio_mime: str = "audio/wav"
+    voice_provider: str = "sarvam"  # elevenlabs | sarvam
+    stt_provider: Optional[str] = None  # elevenlabs | sarvam | None for text input
 
     # Keep cached clients working during the production rollout.
     @computed_field
@@ -309,9 +325,22 @@ def get_session_or_404(session_id: str) -> dict:
     return session
 
 
-async def tts_or_502(**kwargs) -> str:
+async def speak(text: str, counterpart: dict, language: str, emotion: str, pace: float, temperature: float) -> tuple[str, str, str]:
+    """Synthesise the counterpart's line. Returns (base64 audio, mime, provider).
+
+    ElevenLabs first when it's the configured provider and its model speaks the language;
+    any failure there falls back to Sarvam Bulbul. A Sarvam failure is a 502.
+    """
+    if TTS_PROVIDER == "elevenlabs" and supports_language(ELEVENLABS_TTS_MODEL, language):
+        try:
+            voice_id = await pick_elevenlabs_voice(counterpart["name"], counterpart.get("gender", "female"))
+            audio = await elevenlabs_tts(text, voice_id, language, emotion=emotion, pace=pace, temperature=temperature)
+            return base64.b64encode(audio).decode("ascii"), ELEVENLABS_AUDIO_MIME, "elevenlabs"
+        except Exception as e:
+            log.warning("ElevenLabs TTS failed; falling back to Sarvam Bulbul: %s", e)
     try:
-        return await sarvam_tts(**kwargs)
+        audio = await sarvam_tts(text=text, speaker=counterpart["voice_id"], language=language, pace=pace, temperature=temperature)
+        return audio, "audio/wav", "sarvam"
     except httpx.HTTPStatusError as e:
         detail = "Sarvam TTS failed."
         if e.response is not None:
@@ -325,6 +354,16 @@ async def tts_or_502(**kwargs) -> str:
         raise HTTPException(502, f"Sarvam TTS unreachable: {e}")
     except ValueError as e:  # missing SARVAM_API_KEY or empty text
         raise HTTPException(502, str(e))
+
+
+async def transcribe(audio_bytes: bytes, language: str, content_type: str) -> tuple[str, str]:
+    """Speech-to-text with the same provider order as speak(). Returns (text, provider)."""
+    if STT_PROVIDER == "elevenlabs":
+        try:
+            return await elevenlabs_stt(audio_bytes, language=language, content_type=content_type), "elevenlabs"
+        except Exception as e:
+            log.warning("ElevenLabs STT failed; falling back to Sarvam Saarika: %s", e)
+    return await sarvam_stt(audio_bytes, language=language, content_type=content_type), "sarvam"
 
 
 async def _none():
@@ -366,7 +405,7 @@ async def judge_with_jev(brief: dict, conversation: list, user_text: str, score:
         return None
 
 
-async def process_user_message(session_id: str, user_text: str) -> RespondResponse:
+async def process_user_message(session_id: str, user_text: str, stt_provider: Optional[str] = None) -> RespondResponse:
     """Jev judges the message (when configured), then actor and coach run concurrently, then TTS.
     Coach failure never fails the turn."""
     session = get_session_or_404(session_id)
@@ -422,12 +461,8 @@ async def process_user_message(session_id: str, user_text: str) -> RespondRespon
     status = status_for(new_score)
 
     pace, temperature = voice_params(difficulty, actor["emotion"], new_state)
-    counterpart_audio = await tts_or_502(
-        text=actor["response"],
-        speaker=brief["counterpart"]["voice_id"],
-        language=session["language"],
-        pace=pace,
-        temperature=temperature,
+    counterpart_audio, audio_mime, voice_provider = await speak(
+        actor["response"], brief["counterpart"], session["language"], actor["emotion"], pace, temperature,
     )
 
     turn_number = sum(1 for turn in conversation if turn["role"] == "user") + 1
@@ -468,6 +503,9 @@ async def process_user_message(session_id: str, user_text: str) -> RespondRespon
         skill_scores=skill_scores,
         counterpart_state=new_state,
         judged_by="jev" if judgement else "actor",
+        audio_mime=audio_mime,
+        voice_provider=voice_provider,
+        stt_provider=stt_provider,
     )
 
 
@@ -486,9 +524,9 @@ async def start_from_brief(brief: dict, difficulty: str, language: str, previous
         except Exception as e:  # English opening is an acceptable fallback
             log.warning("Opening-line translation failed; using English: %s", e)
 
-    opening_audio = await tts_or_502(
-        text=opening, speaker=counterpart["voice_id"], language=language,
-        pace=diff["tts_pace"], temperature=diff["tts_temperature"],
+    opening_emotion = "angry" if brief["kind"] == "classic" else DEFAULT_EMOTION
+    opening_audio, audio_mime, voice_provider = await speak(
+        opening, counterpart, language, opening_emotion, diff["tts_pace"], diff["tts_temperature"],
     )
 
     state = initial_state(difficulty)
@@ -502,8 +540,7 @@ async def start_from_brief(brief: dict, difficulty: str, language: str, previous
         "current_score": diff["starting_score"],
         "status": "ongoing",
         "conversation": [{
-            "role": "counterpart", "text": opening,
-            "emotion": "angry" if brief["kind"] == "classic" else DEFAULT_EMOTION,
+            "role": "counterpart", "text": opening, "emotion": opening_emotion,
             "score_delta": 0, "state": {**state, "receptiveness": diff["starting_score"]}, "timestamp": now_iso(),
         }],
         "system_prompt": build_actor_prompt(brief, difficulty, language),
@@ -530,6 +567,8 @@ async def start_from_brief(brief: dict, difficulty: str, language: str, previous
         dimensions=dimension_list(conversation_type),
         goal=brief.get("user_goal") or "",
         counterpart_state=state,
+        audio_mime=audio_mime,
+        voice_provider=voice_provider,
     )
 
 
@@ -544,6 +583,9 @@ async def health():
         "supabase": db.supabase is not None,
         "storage": db.storage_mode(),
         "judge": "jev" if judge_enabled() else "actor",
+        "tts": TTS_PROVIDER,
+        "stt": STT_PROVIDER,
+        "tts_model": ELEVENLABS_TTS_MODEL if TTS_PROVIDER == "elevenlabs" else "bulbul:v3",
     }
 
 
@@ -706,10 +748,12 @@ async def respond_voice(session_id: str, audio: UploadFile = File(...)):
     """Voice input → STT → judge → actor + coach → TTS."""
     session = get_session_or_404(session_id)
     audio_bytes = await audio.read()
+    if not audio_bytes or len(audio_bytes) < 500:
+        raise HTTPException(400, "Audio too short. Hold the mic for at least a second.")
     try:
-        user_text = await sarvam_stt(audio_bytes, language=session["language"], content_type=audio.content_type or "")
+        user_text, stt_provider = await transcribe(audio_bytes, session["language"], audio.content_type or "")
     except ValueError as e:
-        raise HTTPException(400, str(e))  # e.g. "Audio too short..."
+        raise HTTPException(400, str(e))
     except httpx.HTTPStatusError as e:
         detail = "Speech recognition failed."
         if e.response is not None:
@@ -719,9 +763,11 @@ async def respond_voice(session_id: str, audio: UploadFile = File(...)):
             except Exception:
                 detail = e.response.text or str(e) or detail
         raise HTTPException(502, detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Speech recognition unreachable: {e}")
     if not user_text.strip():
         user_text = "(silence)"
-    return await process_user_message(session_id, user_text)
+    return await process_user_message(session_id, user_text, stt_provider=stt_provider)
 
 
 @app.post("/api/session/{session_id}/respond-text", response_model=RespondResponse)

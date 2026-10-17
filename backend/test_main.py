@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 
 # Never initialize a real database client during test discovery.
-with patch.dict(os.environ, {"SUPABASE_URL": "", "SUPABASE_SERVICE_KEY": "", "TYPESAFE_API_KEY": ""}):
+with patch.dict(os.environ, {"SUPABASE_URL": "", "SUPABASE_SERVICE_KEY": "", "TYPESAFE_API_KEY": "",
+                             "ELEVENLABS_API_KEY": "", "TTS_PROVIDER": "", "STT_PROVIDER": ""}):
     import content
     import db
+    import elevenlabs
     import main
     import parsing
     import prompts
@@ -668,6 +670,133 @@ class RehearsalLoopTests(SessionTestCase):
         self.assertEqual(ctx.exception.status_code, 404)
         with self.assertRaises(HTTPException):
             await main.get_session(started.session_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ElevenLabsHelperTests(unittest.TestCase):
+    def test_language_support_by_model(self):
+        self.assertTrue(elevenlabs.supports_language("eleven_v3", "te-IN"))
+        self.assertTrue(elevenlabs.supports_language("eleven_v3_conversational", "bn-IN"))
+        self.assertTrue(elevenlabs.supports_language("eleven_flash_v2_5", "hi-IN"))
+        self.assertFalse(elevenlabs.supports_language("eleven_multilingual_v2", "te-IN"))
+        self.assertFalse(elevenlabs.supports_language("eleven_multilingual_v2", "kn-IN"))
+
+    def test_v3_gets_emotion_tags_and_three_level_stability(self):
+        self.assertEqual(elevenlabs.tts_text("eleven_v3", "angry", "Go away."), "[angry] Go away.")
+        self.assertEqual(elevenlabs.tts_text("eleven_v3", "neutral", "Go away."), "Go away.")
+        self.assertEqual(elevenlabs.tts_text("eleven_multilingual_v2", "angry", "Go away."), "Go away.")
+        self.assertEqual(elevenlabs.voice_settings("eleven_v3", "angry", 1.3, 0.9), {"stability": 0.0, "similarity_boost": 0.75})
+        self.assertEqual(elevenlabs.voice_settings("eleven_v3", "cold", 0.85, 0.3)["stability"], 1.0)
+        self.assertEqual(elevenlabs.voice_settings("eleven_v3", "neutral", 1.0, 0.6)["stability"], 0.5)
+        v2 = elevenlabs.voice_settings("eleven_multilingual_v2", "angry", 1.3, 0.9)
+        self.assertEqual(v2["speed"], 1.2)
+        self.assertEqual(v2["stability"], 0.28)
+        self.assertEqual(v2["style"], 0.5)
+
+    def test_voice_pool_prefers_indian_accents_and_picks_deterministically(self):
+        voices = [
+            {"voice_id": "f1", "labels": {"gender": "female", "accent": "american"}},
+            {"voice_id": "m1", "labels": {"gender": "male", "accent": "british"}},
+            {"voice_id": "f2", "labels": {"gender": "Female", "accent": "Indian"}},
+            {"voice_id": "x", "labels": {}},
+        ]
+        self.assertEqual(elevenlabs.voice_pool(voices, "female"), ["f2", "f1"])
+        self.assertEqual(elevenlabs.voice_pool(voices, "male"), ["m1"])
+        self.assertEqual(elevenlabs.choose_voice("Rohan", ["a", "b", "c"]), elevenlabs.choose_voice("rohan", ["a", "b", "c"]))
+
+
+class ElevenLabsVoiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pick_voice_uses_account_voices_then_env_then_defaults(self):
+        voices = [{"voice_id": "acct-f", "labels": {"gender": "female"}}]
+        with patch.object(elevenlabs, "get_voices", AsyncMock(return_value=voices)):
+            self.assertEqual(await elevenlabs.pick_elevenlabs_voice("Ananya", "female"), "acct-f")
+            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Rohan", "male"), elevenlabs.DEFAULT_VOICE_IDS["male"])
+        with patch.dict(os.environ, {"ELEVENLABS_VOICE_IDS_MALE": "env-a, env-b"}), \
+             patch.object(elevenlabs, "get_voices", AsyncMock(side_effect=RuntimeError("no"))):
+            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Rohan", "male"), ["env-a", "env-b"])
+        with patch.object(elevenlabs, "get_voices", AsyncMock(side_effect=RuntimeError("no"))):
+            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Ananya", "female"), elevenlabs.DEFAULT_VOICE_IDS["female"])
+
+
+class SpeechProviderTests(SessionTestCase):
+    """speak()/transcribe() order: ElevenLabs when configured and able, Sarvam otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        self.el_tts = patch.object(main, "elevenlabs_tts", AsyncMock(return_value=b"mp3"))
+        self.el_stt = patch.object(main, "elevenlabs_stt", AsyncMock(return_value="eleven heard"))
+        self.el_voice = patch.object(main, "pick_elevenlabs_voice", AsyncMock(return_value="v1"))
+        self.sarvam_stt = patch.object(main, "sarvam_stt", AsyncMock(return_value="sarvam heard"))
+        for p in (self.el_tts, self.el_stt, self.el_voice, self.sarvam_stt):
+            p.start()
+
+    def tearDown(self):
+        for p in (self.el_tts, self.el_stt, self.el_voice, self.sarvam_stt):
+            p.stop()
+        super().tearDown()
+
+    counterpart = {"name": "Rohan", "gender": "male", "voice_id": "rohan"}
+
+    async def test_sarvam_only_when_not_configured(self):
+        with patch.object(main, "TTS_PROVIDER", "sarvam"):
+            self.assertEqual(await main.speak("Hi", self.counterpart, "hi-IN", "angry", 1.1, 0.7), ("audio", "audio/wav", "sarvam"))
+        main.elevenlabs_tts.assert_not_called()
+
+    async def test_elevenlabs_first_with_emotion_and_mp3(self):
+        with patch.object(main, "TTS_PROVIDER", "elevenlabs"):
+            result = await main.speak("Hi", self.counterpart, "te-IN", "angry", 1.1, 0.7)
+        self.assertEqual(result, ("bXAz", "audio/mpeg", "elevenlabs"))
+        main.sarvam_tts.assert_not_called()
+        main.pick_elevenlabs_voice.assert_awaited_with("Rohan", "male")
+        self.assertEqual(main.elevenlabs_tts.call_args.kwargs["emotion"], "angry")
+
+    async def test_elevenlabs_failure_falls_back_to_sarvam(self):
+        main.elevenlabs_tts.side_effect = RuntimeError("quota")
+        with patch.object(main, "TTS_PROVIDER", "elevenlabs"):
+            self.assertEqual(await main.speak("Hi", self.counterpart, "hi-IN", "cold", 0.9, 0.4), ("audio", "audio/wav", "sarvam"))
+        self.assertEqual(main.sarvam_tts.call_args.kwargs["speaker"], "rohan")
+
+    async def test_unsupported_language_skips_elevenlabs_without_a_call(self):
+        with patch.object(main, "TTS_PROVIDER", "elevenlabs"), patch.object(main, "ELEVENLABS_TTS_MODEL", "eleven_multilingual_v2"):
+            self.assertEqual((await main.speak("Hi", self.counterpart, "te-IN", "neutral", 1.0, 0.6))[2], "sarvam")
+            self.assertEqual((await main.speak("Hi", self.counterpart, "hi-IN", "neutral", 1.0, 0.6))[2], "elevenlabs")
+        self.assertEqual(main.elevenlabs_tts.call_count, 1)
+
+    async def test_transcribe_order_and_fallback(self):
+        with patch.object(main, "STT_PROVIDER", "elevenlabs"):
+            self.assertEqual(await main.transcribe(b"x" * 600, "hi-IN", "audio/wav"), ("eleven heard", "elevenlabs"))
+            main.elevenlabs_stt.side_effect = RuntimeError("down")
+            self.assertEqual(await main.transcribe(b"x" * 600, "hi-IN", "audio/wav"), ("sarvam heard", "sarvam"))
+        with patch.object(main, "STT_PROVIDER", "sarvam"):
+            self.assertEqual(await main.transcribe(b"x" * 600, "hi-IN", "audio/wav"), ("sarvam heard", "sarvam"))
+        self.assertEqual(main.elevenlabs_stt.call_count, 2)
+
+    async def test_session_start_and_turn_report_provider_and_mime(self):
+        with patch.object(main, "TTS_PROVIDER", "elevenlabs"):
+            started = await self.start_preset(language="en-IN")
+            self.assertEqual((started.audio_mime, started.voice_provider), ("audio/mpeg", "elevenlabs"))
+            self.assertEqual(main.elevenlabs_tts.call_args.kwargs["emotion"], "neutral")
+            result = await self.respond(started.session_id)
+            self.assertEqual((result.audio_mime, result.voice_provider, result.stt_provider), ("audio/mpeg", "elevenlabs", None))
+
+    async def test_respond_voice_reports_stt_provider_and_rejects_short_audio(self):
+        from io import BytesIO
+        from fastapi import UploadFile
+        from starlette.datastructures import Headers
+
+        started = await self.start_preset(language="hi-IN")
+        upload = UploadFile(file=BytesIO(b"x" * 600), filename="a.wav", headers=Headers({"content-type": "audio/wav"}))
+        with patch.object(main, "STT_PROVIDER", "elevenlabs"), patch.object(main, "sarvam_llm", fake_llm()):
+            result = await main.respond_voice(started.session_id, upload)
+        self.assertEqual(result.user_text, "eleven heard")
+        self.assertEqual(result.stt_provider, "elevenlabs")
+        self.assertEqual(main.elevenlabs_stt.call_args.kwargs["language"], "hi-IN")
+
+        short = UploadFile(file=BytesIO(b"x" * 10), filename="a.wav", headers=Headers({"content-type": "audio/wav"}))
+        with self.assertRaises(HTTPException) as ctx:
+            await main.respond_voice(started.session_id, short)
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
