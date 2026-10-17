@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is PatchUp
 
-A voice-first relationship conversation simulator where users practice convincing an angry AI girlfriend to forgive them. Uses the full Sarvam AI stack: Bulbul V3 (TTS), Saarika v2.5 (STT), Sarvam-M (LLM), and Mayura v1 (Translate). Built for the #TheMicIsYours Sarvam AI challenge.
+A voice-first simulator for rehearsing difficult conversations before they happen: asking for a raise, giving hard feedback, telling your father you're quitting, a breakup, a layoff, confronting a co-founder, or bring-your-own. An **actor** LLM plays the counterpart (with hidden motivations and curveballs) while every user turn is **judged**: how it moves the counterpart, and how it scores on a rubric. The original "convince your angry girlfriend" game survives as the *Classic* mode. Uses the full Sarvam AI stack: Bulbul V3 (TTS), Saarika v2.5 (STT), Sarvam-M (actor, coach note, scenario builder, debrief), Mayura v1 (translates the counterpart's opening line into the session language, and native-script user turns for the judge). Judgement is **TypeSafe Jev** (typed Score/Noul/Choice answers, no generated text) when `TYPESAFE_API_KEY` is set; otherwise the Sarvam-M actor self-reports movement and the coach self-scores. Built for the #TheMicIsYours Sarvam AI challenge.
 
 ## Development Commands
 
 ### Backend (FastAPI + Python)
 ```bash
 cd backend
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env  # Add SARVAM_API_KEY; SUPABASE_* keys optional
-uvicorn main:app --reload --port 8000
+uv venv venv && uv pip install --python venv/bin/python -r requirements.txt   # or: python -m venv venv && pip install -r requirements.txt
+cp .env.example .env  # Add SARVAM_API_KEY; SUPABASE_* optional; ALLOWED_ORIGINS for prod
+./venv/bin/uvicorn main:app --reload --port 8000
+./venv/bin/python -m unittest discover -s . -v   # offline tests, no network or DB
 ```
 
 ### Frontend (Next.js 16 + React 18 + Tailwind)
@@ -23,61 +23,60 @@ cd frontend
 npm install
 cp .env.local.example .env.local
 npm run dev          # Dev server at localhost:3000
-npm run build        # Production build
+npm run build        # Production build (also the type check)
 ```
 
 ### Database (optional)
-App works with in-memory storage when Supabase is not configured. To use Supabase, run `supabase/migration.sql` in the SQL Editor and set `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` in `backend/.env`.
+App works with in-memory storage when Supabase is not configured. Fresh project: run `supabase/migration.sql` in the SQL Editor. Existing project: run `supabase/migrations/*.sql` in order. Set `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` in `backend/.env`. The rehearsal columns need `002_rehearsal_scenarios.sql`; without it inserts fail and sessions silently live in memory for 60s at a time.
 
 ## Architecture
 
-### Monolith backend
-Everything lives in `backend/main.py` — a single FastAPI file containing:
-- Sarvam API helpers (`sarvam_stt`, `sarvam_tts`, `sarvam_llm`)
-- Supabase/in-memory DB helpers (`db_create_session`, `db_get_session`, `db_update_session`)
-- Game data definitions (`PERSONAS`, `SCENARIOS`, `DIFFICULTY_CONFIG`, `EMOTION_VOICE_PARAMS`)
-- LLM system prompt builder (`build_system_prompt`)
-- Core conversation loop (`process_user_message`) shared by voice and text endpoints
-- All API endpoints under `/api/`
+### Backend modules (`backend/`)
+- `main.py` — FastAPI app, CORS, Pydantic models, endpoints, orchestration (`process_user_message`, `start_from_brief`, `build_scenario`, `end_session_endpoint`). All network I/O is called from here, so tests patch `main.sarvam_llm` / `main.sarvam_tts` and `db.supabase`.
+- `content.py` — pure data. Rehearsal `PRESETS`, classic `PERSONAS` / `SCENARIOS`, `DIFFICULTY_CONFIG` (temperaments `open|defensive|hostile` + classic `easy..nightmare`, each with a starting receptiveness and trust/defensiveness dials), `RUBRICS` (coach dimensions + actor hints per conversation type), `EMOTION_VOICE_PARAMS`, Bulbul `VOICES`, safety keywords and resources. `preset_brief()` / `classic_brief()` express both flows as one brief shape.
+- `prompts.py` — actor, coach, scenario-builder and debrief prompt builders. Sarvam-M needs the first non-system message to be from the user, so the opening line is folded into the system prompt.
+- `parsing.py` — LLM-output parsers that never raise on bad output (`parse_actor` falls back, `parse_coach` / `parse_brief` return None) plus `brief_from_data` for client-supplied briefs. Only `parse_tips` raises.
+- `sarvam.py` — `sarvam_stt`, `sarvam_tts`, `sarvam_llm(messages, temperature, max_tokens)`, `sarvam_translate`.
+- `typesafe.py` — TypeSafe Jev via `POST https://api.typesafe.ai/v1/systemone` (httpx, no SDK). `judge_turn()` asks 6 Score questions in one request (movement, trust, defensiveness + the rubric's 3 dimensions) and maps expected levels to deltas / 0-10 in code; `judge_intake()` asks 2 Nouls (abuse, self-harm; flagged at ≥ `SAFETY_THRESHOLD` 0.6) + 1 Choice (conversation type). `judge_enabled()` is just "is the key set". Level descriptions live in `content.py` (`RUBRICS[...]["dimensions"][dim]["levels"]`, `MOVEMENT_LEVELS`, `TRUST_LEVELS`, `DEFENSIVENESS_LEVELS`).
+- `db.py` — Supabase client with in-memory fallback. Any Supabase error opens a 60s circuit breaker; sessions created meanwhile live in `memory_sessions` and are always read from there first. `normalize_session` maps legacy `boyfriend`/`girlfriend` roles and fills missing rehearsal columns.
 
-### Core conversation flow
-1. `POST /api/session/start` — creates session, generates opening TTS audio
-2. `POST /api/session/{id}/respond` — voice input: audio → STT → LLM (JSON) → TTS → response
-3. `POST /api/session/{id}/respond-text` — text fallback: text → LLM (JSON) → TTS → response
-4. `POST /api/session/{id}/end` — ends session, generates AI tips, records stats
+### The brief
+Every session is driven by a brief: `{kind: preset|custom|classic, conversation_type, counterpart{name, role, gender, relationship, style, voice_id}, user_goal, user_fears, history, hidden_motivations[], curveballs[], opening_line}`. Presets are canned briefs (no LLM). Custom ones come from `POST /api/scenario/build` (Sarvam-M), which also runs a keyword + LLM safety screen and returns a `safety` payload with helplines instead of a brief for self-harm/abuse. Classic sessions are converted with `classic_brief()`. The brief is stored on the session (`brief` JSONB); rows written before briefs existed are rebuilt from `persona_id`/`scenario_id` by `session_brief()`.
 
-Both voice and text endpoints funnel through `process_user_message()` which handles the LLM call, score update, TTS generation, and DB persistence.
+### One user turn: judge → actor + coach → TTS
+1. **Judge** (`judge_with_jev`). With a TypeSafe key: if the message is in a native Indic script, Mayura translates it to English first (Jev is English-first); then one Jev request returns movement/trust/defensiveness deltas and the 3 rubric scores. Positive movement is scaled by the difficulty's `gain_factor` (`apply_gain`); losses land in full. Code updates `current_score` / `counterpart_state` *before* the actor speaks. Without a key, or if Jev fails, this step is skipped and the actor self-reports (`judged_by: "actor"`).
+2. **Actor + coach** run concurrently (`asyncio.gather`, both Sarvam-M). The actor gets the already-updated state when Jev judged (`build_actor_messages(..., self_judging=False)`) and returns `{response, emotion}`; when self-judging, the prompt suffix also asks for the three deltas. The coach gets Jev's scores and only writes `{note, stronger}`; when self-judging it also returns `scores`. A coach failure never fails the turn.
+3. **TTS** of the actor's reply; pace/temperature = avg(difficulty, emotion) ± a defensiveness nudge.
 
-### LLM response format
-The LLM is prompted to return JSON with: `response`, `score_delta` (-25 to +25), `emotion`, `should_end`, `end_reason`. The `parse_llm_json()` function handles markdown fences and malformed JSON with a fallback.
+`current_score` is the counterpart's **receptiveness** and drives the meter and end conditions (≥90 → `patched_up`, ≤0 → `blocked`; status names kept for compatibility). Coach output is stored on the user turn as `coach` (with `judged_by`); running averages in `skill_scores`. Stats are recorded exactly once: in `process_user_message` when the score resolves the session, else in `/end` when the user quits.
 
-### TTS voice parameters
-Bulbul V3 pace/temperature are computed as the average of the difficulty base params and the emotion-specific params from `EMOTION_VOICE_PARAMS`.
+### Endpoints (`/api/`)
+- `GET /catalog` (presets, personas, scenarios, temperaments, difficulties, languages, rubrics), `/health`, `/leaderboard`
+- `POST /scenario/build` `{preset_id?, intake?}` → `{brief | safety, built_by, judged_by}`; untouched preset intake skips the LLM. Otherwise Sarvam-M writes the brief while Jev classifies safety + conversation type in parallel; Jev's safety verdict wins, and its conversation type is used for custom scenarios (presets keep theirs)
+- `POST /session/start` `{brief, difficulty, language}` or classic `{persona_id, scenario_id, difficulty, language}`; non-classic opening lines are translated with Mayura when language ≠ `en-IN`
+- `POST /session/{id}/respond` (WAV upload) · `/respond-text` (form field `text`)
+- `POST /session/{id}/rewind` `{turn_number}` — truncate before that user turn, restore state from the snapshot on the preceding counterpart turn (or replay deltas for legacy rows), reopen
+- `POST /session/{id}/restart` — same brief/difficulty/language, `previous_session_id` set; `/end` then returns `previous_score`
+- `POST /session/{id}/end` — debrief: verdict, tips, `skill_scores`, annotated `transcript`, `reveal` (hidden motivations + curveballs), `previous_score`
+- `GET /session/{id}` · `DELETE /session/{id}`
 
-### Frontend routing (Next.js App Router)
-- `/` — Landing page
-- `/setup` — Persona → scenario → difficulty → language picker
-- `/chat?id=...` — Voice conversation UI (ChatContent.tsx is the core component)
-- `/result?id=...` — Score verdict, tips, share CTA
+### Conversation turn shape
+Counterpart turns: `{role, text, emotion, score_delta, state{receptiveness,trust,defensiveness}, timestamp}`. User turns: `{role, text, turn_number, coach|null, timestamp}`.
 
-### Frontend API layer
-`frontend/src/lib/api.ts` is the API client. It uses `NEXT_PUBLIC_API_URL` (defaults to `http://localhost:8000`). Audio is transferred as base64 strings; `playBase64Audio()` handles decoding and playback.
-
-### Key components
-- `ChatContent.tsx` — core voice conversation UI with mic recording, chat bubbles, and score updates
-- `PatchMeter.tsx` — heart-fill progress bar showing patch-up score
-- `MicButton.tsx` — recording button with animations
-- `useAudioRecorder.ts` — browser MediaRecorder hook
-
-### Storage pattern
-Supabase is optional. The backend checks if `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set; if not, it falls back to an in-memory `dict`. All DB operations go through `db_*` helper functions that handle both paths.
+### Frontend (Next.js App Router)
+- `/` landing · `/setup` mode picker (presets / write your own / classic) → intake or persona+scenario → temperament or difficulty → language → build + start · `/chat?id=` · `/result?id=`
+- `ChatContent.tsx` — meter labelled by the rubric (`Forgiveness`, `Buy-in`, `Openness`, `Acceptance`), compact `SkillMeter`, coach notes on user bubbles, ↺ Retry (rewind). No auto-redirect at the end: the banner offers "Retry last turn" or "See debrief".
+- `ResultContent.tsx` — calls `/end` on mount (the chat page no longer does), skill bars, reveal, annotated transcript, run again, delete.
+- `lib/api.ts` — typed client; `getCatalog()` is the only source of presets/options (nothing is hardcoded in the setup page).
+- Session metadata is passed between pages via `sessionStorage` (`patchup_session`, `patchup_result`).
 
 ## Environment Variables
 
 ### Backend (`backend/.env`)
-- `SARVAM_API_KEY` — required, from dashboard.sarvam.ai
-- `SUPABASE_URL` — optional, pre-filled in .env.example
-- `SUPABASE_SERVICE_KEY` — optional, leave blank for in-memory mode
+- `SARVAM_API_KEY` — required
+- `TYPESAFE_API_KEY` — optional; set = Jev judges turns and intakes, blank = Sarvam-M self-judges. `/api/health` reports `judge`.
+- `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` — optional; blank = in-memory
+- `ALLOWED_ORIGINS` — comma-separated; defaults to `http://localhost:3000,http://127.0.0.1:3000`. Credentials are off.
 
 ### Frontend (`frontend/.env.local`)
 - `NEXT_PUBLIC_API_URL` — defaults to `http://localhost:8000`

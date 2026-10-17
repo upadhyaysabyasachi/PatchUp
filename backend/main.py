@@ -1,578 +1,138 @@
-import os
-import json
-import base64
-import uuid
-from typing import Optional
-from datetime import datetime, timezone
+"""PatchUp API: rehearse difficult conversations with a voice counterpart and a coach.
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, computed_field
+Orchestration lives here. Content (presets, rubrics) is in content.py, prompt text in
+prompts.py, LLM-output parsing in parsing.py, Sarvam calls in sarvam.py, TypeSafe Jev
+judgements in typesafe.py, storage in db.py.
+"""
+import asyncio
+import logging
+import os
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+
 import httpx
 from dotenv import load_dotenv
-from supabase import create_client, Client
-
-try:
-    from postgrest.exceptions import APIError as PostgrestAPIError
-except ImportError:
-    PostgrestAPIError = Exception  # noqa: A001
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, computed_field
 
 load_dotenv()
 
-app = FastAPI(title="PatchUp API", version="1.0.0")
+import db  # noqa: E402  (reads env at import; load_dotenv must run first)
+from content import (  # noqa: E402
+    CLASSIC_DIFFICULTY_IDS, DEFAULT_EMOTION, DIFFICULTY_CONFIG, EMOTION_VOICE_PARAMS, LANGUAGES,
+    PERSONAS, PRESETS, RUBRICS, SCENARIOS, TEMPERAMENT_IDS, classic_brief, guess_conversation_type,
+    pick_voice, preset_brief, preset_intake, safety_payload, screen_intake_text,
+)
+from db import (  # noqa: E402
+    db_create_session, db_delete_session, db_get_session, db_leaderboard, db_record_stats,
+    db_update_session,
+)
+from parsing import brief_from_data, clamp_int, parse_actor, parse_brief, parse_coach, parse_tips  # noqa: E402
+from prompts import (  # noqa: E402
+    build_actor_messages, build_actor_prompt, build_brief_messages, build_coach_messages,
+    build_debrief_messages,
+)
+from sarvam import sarvam_llm, sarvam_stt, sarvam_translate, sarvam_tts  # noqa: E402
+from typesafe import judge_enabled, judge_intake, judge_turn, needs_english  # noqa: E402
 
+log = logging.getLogger("patchup")
+
+app = FastAPI(title="PatchUp API", version="2.1.0")
+
+# Browsers only; no cookies are used, so credentials stay off. Set ALLOWED_ORIGINS in prod.
+# ALLOWED_ORIGIN_REGEX covers hosts that vary per deployment (Vercel preview URLs).
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if origin.strip()
+]
+ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX") or None
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─── Config ───────────────────────────────────────────────────────────────────
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
-SARVAM_BASE_URL = "https://api.sarvam.ai"
-
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
-
-supabase: Optional[Client] = None
-if SUPABASE_URL and SUPABASE_KEY:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("✅ Supabase connected")
-else:
-    print("⚠️  Supabase not configured — using in-memory storage")
-
-# In-memory fallback when Supabase isn't configured or Supabase fails (e.g. invalid key)
-memory_sessions: dict = {}
-_supabase_failed = False  # set True on first Supabase error so we stop trying
-
-# ─── Persona Definitions ─────────────────────────────────────────────────────
-PERSONAS = {
-    "priya": {
-        "id": "priya",
-        "name": "Priya",
-        "title": "Bollywood Drama Queen",
-        "emoji": "🎬",
-        "description": "Over-the-top emotional, filmy dialogues, thinks her life is a Karan Johar movie",
-        "voice_id": "Priya",
-        "default_language": "hi-IN",
-        "system_prompt": (
-            "You are Priya, an extremely dramatic Indian girlfriend who treats every fight like a Bollywood movie scene. "
-            "You use filmy dialogues, dramatic pauses, and emotional blackmail. You say things like 'Tum meri zindagi barbaad kar diya!', "
-            "'Mujhe laga tha tum alag ho', 'Main apni maa se kya bolungi?'. You mix Hindi and English naturally. "
-            "You are hurt but deep down you want him to fight for you. You love grand gestures and heartfelt apologies."
-        ),
-    },
-    "neha": {
-        "id": "neha",
-        "name": "Neha",
-        "title": "Silent Treatment Expert",
-        "emoji": "🧊",
-        "description": "One-word answers, long pauses, makes you wonder if she's even there",
-        "voice_id": "Neha",
-        "default_language": "en-IN",
-        "system_prompt": (
-            "You are Neha, a girlfriend who is a master of the silent treatment. You respond with extremely short, cold replies. "
-            "Things like 'K.', 'Hmm.', 'Whatever.', 'Sure.', 'Fine.', 'I don't care.', 'Do what you want.'. "
-            "You occasionally drop a devastating one-liner that cuts deep. You speak mostly in English with occasional Hindi. "
-            "You make him feel the weight of silence. Only genuinely thoughtful and specific apologies crack your armor. "
-            "Generic 'sorry' gets a 'K.' from you."
-        ),
-    },
-    "ritu": {
-        "id": "ritu",
-        "name": "Ritu",
-        "title": "The Logical Arguer",
-        "emoji": "🧠",
-        "description": "Builds a legal case against you, has receipts and timestamps for everything",
-        "voice_id": "Ritu",
-        "default_language": "en-IN",
-        "system_prompt": (
-            "You are Ritu, a sharp and logical girlfriend who argues like a lawyer. You remember exact dates, times, and quotes. "
-            "You say things like 'On January 14th at 9:47 PM, you said and I quote...', 'This is the third time in two months', "
-            "'Let me list the pattern I'm seeing here'. You mix English and Hindi. You are not emotional but coldly analytical. "
-            "You deconstruct his excuses with logic. Only genuine accountability and a concrete plan to change impresses you."
-        ),
-    },
-    "kavya": {
-        "id": "kavya",
-        "name": "Kavya",
-        "title": "The Explosive One",
-        "emoji": "🌪️",
-        "description": "Zero to hundred real quick, rapid-fire accusations, full rage mode",
-        "voice_id": "Kavya",
-        "default_language": "hi-IN",
-        "system_prompt": (
-            "You are Kavya, an extremely passionate and explosive Indian girlfriend. You go from 0 to 100 instantly. "
-            "You fire rapid accusations, bring up old fights, and escalate quickly. You speak mostly in Hindi with English mixed in. "
-            "Things like 'Tumse baat hi nahi karni mujhe!', 'Tumhari himmat kaise hui?!', 'Sab yaad hai mujhe!'. "
-            "You are loud, fast, and intense. But underneath all the anger is deep hurt. A sincere, calm, patient response "
-            "that shows he truly understands why you're upset can break through — but it takes real effort."
-        ),
-    },
-}
-
-# ─── Scenario Definitions ────────────────────────────────────────────────────
-SCENARIOS = {
-    "anniversary": {
-        "id": "anniversary",
-        "title": "Forgot the Anniversary",
-        "emoji": "💀",
-        "description": "You completely forgot your anniversary. She planned the whole day. You didn't even wish her.",
-        "opening_lines": {
-            "priya": "Pata hai aaj kya din hai? Nahi pata na? Obviously nahi pata. Tumhe kab yaad rehta hai mera. Koi nahi, main toh aadat si ho gayi hai.",
-            "neha": "Hey.",
-            "ritu": "So. Today is February 10th. Does that date ring a bell? I'll give you 10 seconds.",
-            "kavya": "TUMHE YAAD BHI HAI AAJ KYA DIN HAI?! Nahi yaad hoga, tum toh apne mein hi rehte ho!",
-        },
-        "context": "The boyfriend forgot their anniversary. The girlfriend had planned something special and waited all day.",
-    },
-    "ex_photo": {
-        "id": "ex_photo",
-        "title": "Caught Liking Ex's Photo",
-        "emoji": "📱",
-        "description": "She caught you liking your ex's vacation photo at 2 AM. Good luck.",
-        "opening_lines": {
-            "priya": "Ek baat batao... raat ke 2 baje tum Sneha ki photo like kar rahe the? SNEHA KI? Woh Sneha jiske baare mein tumne bola tha ki 'she means nothing to me'?",
-            "neha": "Interesting photo Sneha posted, no? You seemed to think so at 2 AM.",
-            "ritu": "I noticed something at 2:03 AM. Your Instagram activity shows you liked Sneha's Maldives photo. The same Sneha you told me on March 15th was 'just a friend from college'. Would you like to explain the timeline?",
-            "kavya": "SNEHA KI PHOTO?! RAAT KE DO BAJE?! Tumhari himmat kaise hui! Main sab dekh liya hai, SCREENSHOTS HAI MERE PAAS!",
-        },
-        "context": "The boyfriend liked his ex-girlfriend Sneha's vacation photo on Instagram at 2 AM.",
-    },
-    "cooking": {
-        "id": "cooking",
-        "title": "Said Her Cooking Was 'Okay'",
-        "emoji": "🍳",
-        "description": "She spent 3 hours making your favorite dish. You said 'hmm, it's okay'. Fatal error.",
-        "opening_lines": {
-            "priya": "Teen ghante... TEEN GHANTE lagaye maine wo biryani banane mein. Aur tumne kya bola? 'Hmm okay hai.' OKAY HAI?!",
-            "neha": "Cool. Next time I'll just order Swiggy.",
-            "ritu": "Let me understand this. I spent 3 hours, used 14 ingredients, watched 3 YouTube tutorials, and your review was — 'hmm, it's okay'. That's 180 minutes of effort summarized in two words.",
-            "kavya": "OKAY?! OKAY BOLA TUMNE?! TEEN GHANTE SE KHANA BANA RAHI THI MAIN! Aaj ke baad khud banao apna khana!",
-        },
-        "context": "The girlfriend spent 3 hours cooking his favorite biryani. He said 'hmm, it's okay' while scrolling his phone.",
-    },
-    "boys_trip": {
-        "id": "boys_trip",
-        "title": "Boys Trip Without Telling Her",
-        "emoji": "✈️",
-        "description": "You planned a Goa trip with the boys. She found out from someone else's Instagram story.",
-        "opening_lines": {
-            "priya": "Mujhe Rahul ki story se pata chala ki tum Goa ja rahe ho. RAHUL KI STORY SE. Main kya hoon tumhari zindagi mein?",
-            "neha": "Saw Rahul's story. Goa looks fun. Have a good trip.",
-            "ritu": "When exactly were you planning to tell me about the Goa trip? Before boarding? After landing? Or was I supposed to find out from Rahul's Instagram story?",
-            "kavya": "GOA JA RAHE HO?! BINA BATAYE?! Mujhe Rahul ki story se pata chala — RAHUL KI STORY SE!",
-        },
-        "context": "The boyfriend planned a Goa trip with friends but didn't tell her. She found out from his friend's Instagram story.",
-    },
-    "late": {
-        "id": "late",
-        "title": "2 Hours Late, No Text",
-        "emoji": "🕐",
-        "description": "You were 2 hours late for dinner and didn't even text. She sat alone at the restaurant.",
-        "opening_lines": {
-            "priya": "Do ghante. Do ghante akeli baithi rahi main restaurant mein. Waiter ne teen baar pucha 'ma'am aur koi aa raha hai?'. Mujhe itna sharam aaya na...",
-            "neha": "I already ate. Alone.",
-            "ritu": "Our reservation was at 8 PM. You arrived at 10:07 PM. That's 2 hours and 7 minutes. I called you 4 times and sent 6 messages. Zero responses.",
-            "kavya": "DO GHANTE! DO GHANTE WAIT KARWAYI TUMNE! EK TEXT NAHI KAR SAKTE THE?!",
-        },
-        "context": "The boyfriend was 2 hours late for a dinner reservation and didn't text or call.",
-    },
-    "gaming": {
-        "id": "gaming",
-        "title": "Chose Gaming Over Date Night",
-        "emoji": "🎮",
-        "description": "She planned date night. You said you'd come but started ranked matches instead.",
-        "opening_lines": {
-            "priya": "Main ready hokar baithi thi. Naya dress pehna tha. Makeup kiya tha. Aur tum? 'Baby bas ek aur match, 20 minute.' WOH 20 MINUTE 3 GHANTE HO GAYE!",
-            "neha": "Your K/D ratio must be great tonight. Congrats.",
-            "ritu": "Let me reconstruct the timeline. 7 PM: 'getting ready'. 7:30: 'one quick match'. 8:15: 'last one I promise'. 9:45: you're still playing. I have the WhatsApp timestamps.",
-            "kavya": "GAMING?! GAMING ZYADA IMPORTANT HAI MUJHSE?! Maine itna plan kiya tha aur tumhe apna stupid game khelna tha!",
-        },
-        "context": "The girlfriend planned a date night. The boyfriend kept saying 'one more match' and never showed up.",
-    },
-}
-
-# ─── Difficulty Config ────────────────────────────────────────────────────────
-DIFFICULTY_CONFIG = {
-    "easy": {
-        "name": "Thoda Gussa",
-        "starting_score": 50,
-        "tts_pace": 0.9,
-        "tts_temperature": 0.4,
-        "prompt_modifier": (
-            "Difficulty: EASY. You are annoyed but willing to listen. You give hints about what he should say. "
-            "You soften relatively easily with a genuine apology. Score generously for good responses (+15 to +25). "
-            "Only deduct heavily for truly dismissive responses."
-        ),
-    },
-    "medium": {
-        "name": "Full Naraaz",
-        "starting_score": 30,
-        "tts_pace": 1.0,
-        "tts_temperature": 0.6,
-        "prompt_modifier": (
-            "Difficulty: MEDIUM. You are genuinely upset. Generic apologies barely register (+2 to +5). "
-            "Only specific, thoughtful responses earn good scores (+10 to +20). Excuses get punished (-10 to -15)."
-        ),
-    },
-    "hard": {
-        "name": "Breakup Mode",
-        "starting_score": 15,
-        "tts_pace": 1.2,
-        "tts_temperature": 0.8,
-        "prompt_modifier": (
-            "Difficulty: HARD. You are on the verge of ending things. One wrong word makes it worse. "
-            "Only deeply genuine acknowledgments earn points (+5 to +15). Generic sorry = -5. Excuses = -15."
-        ),
-    },
-    "nightmare": {
-        "name": "Maa Ko Bata Dungi",
-        "starting_score": 5,
-        "tts_pace": 1.3,
-        "tts_temperature": 0.9,
-        "prompt_modifier": (
-            "Difficulty: NIGHTMARE. You are FURIOUS. You threaten to involve family. You bring up things from years ago. "
-            "Almost nothing works. Only extraordinary, deeply heartfelt responses earn points (+3 to +10). Score very harshly."
-        ),
-    },
-}
-
-# ─── Voice Emotion Mapping ───────────────────────────────────────────────────
-EMOTION_VOICE_PARAMS = {
-    "angry":     {"pace": 1.3,  "temperature": 0.9},
-    "cold":      {"pace": 0.85, "temperature": 0.3},
-    "sarcastic": {"pace": 1.0,  "temperature": 0.6},
-    "softening": {"pace": 0.9,  "temperature": 0.5},
-    "happy":     {"pace": 1.0,  "temperature": 0.5},
-    "crying":    {"pace": 0.8,  "temperature": 0.7},
-    "explosive": {"pace": 1.4,  "temperature": 0.95},
-}
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SARVAM API HELPERS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _stt_file_tuple(content_type: Optional[str], audio_bytes: bytes) -> tuple[str, tuple]:
-    """Return (form_key, file_tuple) for STT. Use simple MIME; Sarvam may reject audio/webm;codecs=opus."""
-    if content_type and "webm" in content_type.lower():
-        return "file", ("audio.webm", audio_bytes, "audio/webm")
-    if content_type and content_type.strip():
-        mime = content_type.split(";")[0].strip() or "audio/wav"
-        return "file", ("audio.wav", audio_bytes, mime)
-    return "file", ("audio.wav", audio_bytes, "audio/wav")
-
-
-async def sarvam_stt(audio_bytes: bytes, language: str = "hi-IN", content_type: Optional[str] = None) -> str:
-    """Speech-to-Text using Sarvam Saarika v2.5. Accepts WAV, WebM, and other formats."""
-    if not audio_bytes or len(audio_bytes) < 500:
-        raise ValueError("Audio too short. Hold the mic for at least a second.")
-    key, file_tuple = _stt_file_tuple(content_type, audio_bytes)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{SARVAM_BASE_URL}/speech-to-text",
-            headers={"api-subscription-key": SARVAM_API_KEY},
-            files={key: file_tuple},
-            data={"language_code": language, "model": "saarika:v2.5"},
-        )
-        if resp.status_code != 200:
-            err_msg = resp.text
-            try:
-                err = resp.json()
-                err_msg = err.get("error", {}).get("message", err_msg) or str(err)
-            except Exception:
-                pass
-            raise httpx.HTTPStatusError(
-                f"Sarvam STT {resp.status_code}: {err_msg}",
-                request=resp.request,
-                response=resp,
-            )
-        return resp.json().get("transcript", "")
-
-
-async def sarvam_tts(
-    text: str,
-    speaker: str = "Priya",
-    language: str = "hi-IN",
-    pace: float = 1.0,
-    temperature: float = 0.6,
-) -> str:
-    """Text-to-Speech using Sarvam Bulbul V3. Returns base64 audio."""
-    if not (SARVAM_API_KEY and text and text.strip()):
-        raise ValueError("SARVAM_API_KEY and non-empty text required for TTS")
-    text_clean = text.strip()[:2500]  # bulbul:v3 max
-    payload = {
-        "text": text_clean,
-        "target_language_code": language.strip(),
-        "speaker": (speaker or "Shubh").strip().lower(),
-        "model": "bulbul:v3",
-        "pace": max(0.5, min(2.0, float(pace))),
-        "temperature": max(0.01, min(2.0, float(temperature))),
-    }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{SARVAM_BASE_URL}/text-to-speech",
-            headers={
-                "api-subscription-key": SARVAM_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-        if resp.status_code != 200:
-            try:
-                err = resp.json()
-                import logging
-                logging.getLogger("patchup").warning("Sarvam TTS error: %s", err)
-            except Exception:
-                pass
-        resp.raise_for_status()
-        data = resp.json()
-        audios = data.get("audios", [])
-        return audios[0] if audios else ""
-
-
-async def sarvam_llm(messages: list, temperature: float = 0.7) -> str:
-    """Chat completion using Sarvam-M."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            f"{SARVAM_BASE_URL}/v1/chat/completions",
-            headers={
-                "api-subscription-key": SARVAM_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "sarvam-m",
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": 512,
-            },
-        )
-        if resp.status_code != 200:
-            print(f"Sarvam LLM error {resp.status_code}: {resp.text}")
-            resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-
-
-def _fix_json_quirks(text: str) -> str:
-    """Fix common LLM JSON quirks that break json.loads."""
-    import re
-    # Remove +N number prefixes (e.g. +2 → 2, +12 → 12) that are invalid JSON
-    text = re.sub(
-        r'"(?:\\.|[^"\\])*"|(:\s*)\+(\d)',
-        lambda match: match.group(1) + match.group(2) if match.group(1) else match.group(0),
-        text,
-    )
-    return text
-
-
-def parse_json_payload(raw: str):
-    """Decode an object or array, including fenced or prose-wrapped JSON."""
-    text = raw.strip()
-    # Strip markdown code fences
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = lines[1:]  # remove opening fence
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # Decode from the first container boundary so trailing prose is harmless.
-        starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
-        if starts:
-            candidate = text[min(starts):]
-            try:
-                return json.JSONDecoder().raw_decode(candidate)[0]
-            except json.JSONDecodeError:
-                return json.JSONDecoder().raw_decode(_fix_json_quirks(candidate))[0]
-        raise
-
-
-def parse_llm_json(raw: str) -> dict:
-    """Actor responses must be objects; malformed output gets a safe fallback."""
-    try:
-        parsed = parse_json_payload(raw)
-        if isinstance(parsed, dict):
-            return parsed
-    except (ValueError, TypeError):
-        pass
-    return {
-        "response": raw[:200],
-        "score_delta": 0,
-        "emotion": "angry",
-        "should_end": False,
-        "end_reason": None,
-    }
-
-
-def parse_tips(raw: str) -> list[str]:
-    tips = parse_json_payload(raw)
-    if not isinstance(tips, list) or len(tips) < 3 or not all(
-        isinstance(tip, str) and tip.strip() for tip in tips
-    ):
-        raise ValueError("Expected at least three non-empty tips")
-    return [tip.strip() for tip in tips[:3]]
-
-
-def normalize_session(session: Optional[dict]) -> Optional[dict]:
-    """Read sessions created before neutral conversation roles were introduced."""
-    if session is None:
-        return None
-    roles = {"boyfriend": "user", "girlfriend": "counterpart"}
-    return {**session, "conversation": [
-        {**turn, "role": roles.get(turn["role"], turn["role"])}
-        for turn in session["conversation"]
-    ]}
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SUPABASE HELPERS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def db_create_session(session_data: dict) -> dict:
-    """Insert a new session into Supabase (or memory fallback)."""
-    global _supabase_failed
-    if supabase and not _supabase_failed:
-        try:
-            result = supabase.table("sessions").insert({
-                "id": session_data["id"],
-                "persona_id": session_data["persona_id"],
-                "scenario_id": session_data["scenario_id"],
-                "difficulty": session_data["difficulty"],
-                "language": session_data["language"],
-                "current_score": session_data["current_score"],
-                "status": "ongoing",
-                "conversation": session_data["conversation"],
-                "system_prompt": session_data["system_prompt"],
-            }).execute()
-            return result.data[0] if result.data else session_data
-        except (PostgrestAPIError, Exception) as e:
-            _supabase_failed = True
-            print(f"⚠️  Supabase error (falling back to in-memory): {e}")
-    memory_sessions[session_data["id"]] = session_data
-    return session_data
-
-
-def db_get_session(session_id: str) -> Optional[dict]:
-    """Fetch a session."""
-    global _supabase_failed
-    if supabase and not _supabase_failed:
-        try:
-            result = supabase.table("sessions").select("*").eq("id", session_id).execute()
-            return normalize_session(result.data[0]) if result.data else None
-        except (PostgrestAPIError, Exception) as e:
-            _supabase_failed = True
-            print(f"⚠️  Supabase error (falling back to in-memory): {e}")
-    return normalize_session(memory_sessions.get(session_id))
-
-
-def db_update_session(session_id: str, updates: dict):
-    """Update session fields."""
-    global _supabase_failed
-    if supabase and not _supabase_failed:
-        try:
-            supabase.table("sessions").update(updates).eq("id", session_id).execute()
-            return
-        except (PostgrestAPIError, Exception) as e:
-            _supabase_failed = True
-            print(f"⚠️  Supabase error (falling back to in-memory): {e}")
-    if session_id in memory_sessions:
-        memory_sessions[session_id].update(updates)
-
-
-def db_record_stats(session_id: str, persona_id: str, scenario_id: str, difficulty: str, final_score: int, status: str, total_turns: int):
-    """Record game stats for leaderboard."""
-    global _supabase_failed
-    if supabase and not _supabase_failed:
-        try:
-            supabase.table("game_stats").insert({
-                "session_id": session_id,
-                "persona_id": persona_id,
-                "scenario_id": scenario_id,
-                "difficulty": difficulty,
-                "final_score": final_score,
-                "status": status,
-                "total_turns": total_turns,
-            }).execute()
-        except (PostgrestAPIError, Exception) as e:
-            _supabase_failed = True
-            print(f"⚠️  Supabase error (falling back to in-memory): {e}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PROMPT BUILDER
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def build_system_prompt(persona_id: str, scenario_id: str, difficulty: str, language: str) -> str:
-    persona = PERSONAS[persona_id]
-    scenario = SCENARIOS[scenario_id]
-    diff_config = DIFFICULTY_CONFIG[difficulty]
-
-    return f"""You are playing the role of {persona['name']}, an angry Indian girlfriend in a voice conversation simulator called PatchUp.
-
-CHARACTER:
-{persona['system_prompt']}
-
-SCENARIO:
-{scenario['description']}
-Context: {scenario['context']}
-
-{diff_config['prompt_modifier']}
-
-LANGUAGE:
-- Primary: {language}
-- Mix Hindi and English naturally (code-mixing) as real Indian couples speak
-- Keep responses SHORT (1-3 sentences max) — this is voice, not text
-
-CRITICAL — OUTPUT FORMAT:
-Respond with ONLY a valid JSON object. No text before or after.
-{{
-    "response": "Your in-character dialogue here",
-    "score_delta": <integer from -25 to 25>,
-    "emotion": "<angry|cold|sarcastic|softening|happy|crying|explosive>",
-    "should_end": <true|false>,
-    "end_reason": "<patched_up|blocked|null>"
-}}
-
-SCORING:
-- Genuine acknowledgment + specific details: +15 to +25
-- Thoughtful, shows he understands her feelings: +10 to +20
-- Simple sincere "I messed up": +5 to +10
-- Generic "sorry babe": +1 to +3
-- Deflecting / changing topic: -5 to -10
-- Making excuses: -10 to -15
-- Getting defensive: -15 to -20
-- Dismissive or hurtful: -20 to -25
-
-END CONDITIONS:
-- Score ≥ 90 → should_end=true, end_reason="patched_up", emotion="happy"
-- Score ≤ 0 → should_end=true, end_reason="blocked", emotion="angry"
-
-Stay in character. React to what he actually says."""
+LANGUAGE_IDS = {language["id"] for language in LANGUAGES}
+GOAL_SCORE = 90
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # REQUEST / RESPONSE MODELS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+class IntakeCounterpart(BaseModel):
+    name: str = ""
+    role: str = ""
+    gender: str = "female"
+    relationship: str = ""
+    style: str = ""
+
+
+class Intake(BaseModel):
+    counterpart: IntakeCounterpart = Field(default_factory=IntakeCounterpart)
+    user_goal: str = ""
+    user_fears: str = ""
+    history: str = ""
+
+
+class ScenarioBuildRequest(BaseModel):
+    preset_id: Optional[str] = None
+    intake: Optional[Intake] = None
+
+
+class ScenarioBuildResponse(BaseModel):
+    brief: Optional[dict] = None
+    safety: Optional[dict] = None
+    built_by: str  # preset | llm | screen
+    judged_by: str = "llm"  # jev | llm | screen
+
+
 class SessionStartRequest(BaseModel):
-    persona_id: str
-    scenario_id: str
+    # Rehearsal flow: a brief from /api/scenario/build
+    brief: Optional[dict] = None
+    # Classic flow
+    persona_id: Optional[str] = None
+    scenario_id: Optional[str] = None
     difficulty: str = "medium"
     language: str = "hi-IN"
+    previous_session_id: Optional[str] = None
+
 
 class SessionStartResponse(BaseModel):
     session_id: str
     opening_message: str
     opening_audio: str
     initial_score: int
-    persona_name: str
+    kind: str
+    counterpart_name: str
+    counterpart_role: str
+    counterpart_emoji: str
     scenario_title: str
     difficulty_name: str
+    conversation_type: str
+    meter_label: str
+    dimensions: list[dict]
+    goal: str
+    counterpart_state: dict
+
+    # Older frontend builds read this name.
+    @computed_field
+    @property
+    def persona_name(self) -> str:
+        return self.counterpart_name
+
+
+class CoachNote(BaseModel):
+    scores: dict[str, float]
+    note: str
+    stronger: str
+
 
 class RespondResponse(BaseModel):
     user_text: str
@@ -583,6 +143,10 @@ class RespondResponse(BaseModel):
     emotion: str
     status: str
     turn_number: int
+    coach: Optional[CoachNote] = None
+    skill_scores: dict[str, float] = Field(default_factory=dict)
+    counterpart_state: dict[str, int] = Field(default_factory=dict)
+    judged_by: str = "actor"  # jev | actor
 
     # Keep cached clients working during the production rollout.
     @computed_field
@@ -595,6 +159,21 @@ class RespondResponse(BaseModel):
     def girlfriend_audio(self) -> str:
         return self.counterpart_audio
 
+
+class RewindRequest(BaseModel):
+    turn_number: int
+
+
+class SessionSnapshot(BaseModel):
+    session_id: str
+    status: str
+    current_score: int
+    counterpart_state: dict
+    skill_scores: dict[str, float]
+    conversation: list[dict]
+    next_turn_number: int
+
+
 class SessionEndResponse(BaseModel):
     final_score: int
     verdict: str
@@ -602,108 +181,355 @@ class SessionEndResponse(BaseModel):
     best_response: Optional[str] = None
     worst_response: Optional[str] = None
     tips: list[str]
+    status: str
+    kind: str
+    conversation_type: str
+    goal: str
+    meter_label: str
+    dimensions: list[dict]
+    skill_scores: dict[str, float]
+    transcript: list[dict]
+    reveal: dict
+    previous_score: Optional[int] = None
+    counterpart_name: str
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SESSION HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def dimension_list(conversation_type: str) -> list[dict]:
+    return [
+        {"id": key, "label": key.replace("_", " ").capitalize(), "description": spec["description"]}
+        for key, spec in RUBRICS[conversation_type]["dimensions"].items()
+    ]
+
+
+def session_brief(session: dict) -> dict:
+    """Rows written before briefs existed are classic girlfriend sessions."""
+    if isinstance(session.get("brief"), dict):
+        return session["brief"]
+    return classic_brief(session["persona_id"], session["scenario_id"])
+
+
+def initial_state(difficulty: str) -> dict:
+    return dict(DIFFICULTY_CONFIG[difficulty]["state"])
+
+
+def session_state(session: dict) -> dict:
+    state = session.get("counterpart_state") or initial_state(session["difficulty"])
+    return {
+        "trust": clamp_int(state.get("trust"), 0, 100, 50),
+        "defensiveness": clamp_int(state.get("defensiveness"), 0, 100, 50),
+    }
+
+
+def state_at(conversation: list, difficulty: str) -> tuple[int, dict]:
+    """Receptiveness + dials at the end of `conversation`, from snapshots or by replaying deltas."""
+    diff = DIFFICULTY_CONFIG[difficulty]
+    for turn in reversed(conversation):
+        if turn.get("role") == "counterpart" and isinstance(turn.get("state"), dict):
+            snapshot = turn["state"]
+            return clamp_int(snapshot.get("receptiveness"), 0, 100, diff["starting_score"]), {
+                "trust": clamp_int(snapshot.get("trust"), 0, 100, diff["state"]["trust"]),
+                "defensiveness": clamp_int(snapshot.get("defensiveness"), 0, 100, diff["state"]["defensiveness"]),
+            }
+    score = diff["starting_score"]
+    for turn in conversation:
+        if turn.get("role") == "counterpart":
+            score = clamp_int(score + clamp_int(turn.get("score_delta", 0), -25, 25), 0, 100)
+    return score, initial_state(difficulty)
+
+
+def skill_averages(conversation: list, dimensions) -> dict[str, float]:
+    totals = {dim: [0.0, 0] for dim in dimensions}
+    for turn in conversation:
+        if turn.get("role") != "user" or not isinstance(turn.get("coach"), dict):
+            continue
+        for dim, value in (turn["coach"].get("scores") or {}).items():
+            if dim in totals and isinstance(value, (int, float)):
+                totals[dim][0] += value
+                totals[dim][1] += 1
+    return {dim: round(total / count, 1) for dim, (total, count) in totals.items() if count}
+
+
+def status_for(score: int) -> str:
+    if score >= GOAL_SCORE:
+        return "patched_up"
+    if score <= 0:
+        return "blocked"
+    return "ongoing"
+
+
+def apply_gain(delta: int, difficulty: str) -> int:
+    """Positive movement is scaled by the temperament; losses land in full."""
+    if delta <= 0:
+        return delta
+    return int(round(delta * DIFFICULTY_CONFIG[difficulty]["gain_factor"]))
+
+
+def voice_params(difficulty: str, emotion: str, state: dict) -> tuple[float, float]:
+    """Average of difficulty base and emotion params, nudged by defensiveness (±0.1 at the extremes)."""
+    diff = DIFFICULTY_CONFIG[difficulty]
+    emo = EMOTION_VOICE_PARAMS.get(emotion, EMOTION_VOICE_PARAMS[DEFAULT_EMOTION])
+    nudge = (state["defensiveness"] - 50) / 500
+    return (diff["tts_pace"] + emo["pace"]) / 2 + nudge, (diff["tts_temperature"] + emo["temperature"]) / 2 + nudge
+
+
+def verdict_for(score: int, kind: str) -> str:
+    if kind == "classic":
+        if score >= GOAL_SCORE: return "🎉 PATCHED UP! She forgave you!"
+        if score >= 70: return "😊 Almost there! She's softening up."
+        if score >= 40: return "😐 Still naraaz. Better luck next time."
+        if score >= 20: return "😤 You made it worse. Much worse."
+        return "💔 BLOCKED. She's done."
+    if score >= GOAL_SCORE: return "You got there."
+    if score >= 70: return "Close. They were coming around."
+    if score >= 40: return "Stalemate. Nothing lost, nothing won."
+    if score >= 20: return "You lost ground."
+    return "They walked away."
+
+
+def normalized_intake(intake: dict) -> dict:
+    counterpart = intake.get("counterpart") or {}
+    return {
+        "counterpart": {key: str(counterpart.get(key, "")).strip() for key in ("name", "role", "gender", "relationship", "style")},
+        **{key: str(intake.get(key, "")).strip() for key in ("user_goal", "user_fears", "history")},
+    }
+
+
+def get_session_or_404(session_id: str) -> dict:
+    session = db_get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return session
+
+
+async def tts_or_502(**kwargs) -> str:
+    try:
+        return await sarvam_tts(**kwargs)
+    except httpx.HTTPStatusError as e:
+        detail = "Sarvam TTS failed."
+        if e.response is not None:
+            try:
+                err = e.response.json()
+                detail = err.get("error", {}).get("message", detail) or str(err)
+            except Exception:
+                detail = e.response.text or detail
+        raise HTTPException(502, detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Sarvam TTS unreachable: {e}")
+    except ValueError as e:  # missing SARVAM_API_KEY or empty text
+        raise HTTPException(502, str(e))
+
+
+async def _none():
+    return None
+
+
+def snapshot(session: dict) -> SessionSnapshot:
+    conversation = session["conversation"]
+    return SessionSnapshot(
+        session_id=session["id"],
+        status=session["status"],
+        current_score=session["current_score"],
+        counterpart_state=session_state(session),
+        skill_scores=session.get("skill_scores") or {},
+        conversation=conversation,
+        next_turn_number=sum(1 for turn in conversation if turn["role"] == "user") + 1,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE CONVERSATION LOGIC (shared by voice + text endpoints)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def judge_with_jev(brief: dict, conversation: list, user_text: str, score: int, state: dict,
+                         language: str) -> Optional[dict]:
+    """Jev's verdict on the user's message, or None when Jev is off or fails (the actor then self-reports)."""
+    if not judge_enabled():
+        return None
+    english = None
+    if language != "en-IN" and needs_english(user_text):
+        try:
+            english = await sarvam_translate(user_text, "en-IN", source_language="auto")
+        except Exception as e:
+            log.warning("Translating the user's message for Jev failed; judging the original: %s", e)
+    try:
+        return await judge_turn(brief, conversation, user_text, score, state, english)
+    except Exception as e:
+        log.warning("Jev judgement failed; the actor self-reports this turn: %s", e)
+        return None
+
+
 async def process_user_message(session_id: str, user_text: str) -> RespondResponse:
-    """Core logic: take user text, get LLM response, generate TTS, update score."""
-    session = db_get_session(session_id)
-    if not session:
-        raise HTTPException(404, "Session not found")
+    """Jev judges the message (when configured), then actor and coach run concurrently, then TTS.
+    Coach failure never fails the turn."""
+    session = get_session_or_404(session_id)
     if session["status"] != "ongoing":
         raise HTTPException(400, f"Session already ended: {session['status']}")
 
-    persona = PERSONAS[session["persona_id"]]
-    diff_config = DIFFICULTY_CONFIG[session["difficulty"]]
+    brief = session_brief(session)
+    dimensions = list(RUBRICS[brief["conversation_type"]]["dimensions"])
+    difficulty = session["difficulty"]
+    state = session_state(session)
+    score = session["current_score"]
     conversation = session["conversation"]
 
-    # Build LLM messages
-    # Sarvam-M requires first non-system message to be "user", so fold the
-    # counterpart's opening line into the system prompt and start the
-    # conversation history from the first user message.
-    opening_text = conversation[0]["text"] if conversation and conversation[0]["role"] == "counterpart" else None
-    system_content = session["system_prompt"]
-    if opening_text:
-        system_content += f"\n\nYou already said this opening line: \"{opening_text}\""
-    llm_messages = [{"role": "system", "content": system_content}]
-    for turn in conversation:
-        if turn is conversation[0] and turn["role"] == "counterpart":
-            continue  # skip opening line, already in system prompt
-        if turn["role"] == "counterpart":
-            llm_messages.append({"role": "assistant", "content": turn["text"]})
-        else:
-            llm_messages.append({"role": "user", "content": turn["text"]})
-    llm_messages.append({
-        "role": "user",
-        "content": f"{user_text}\n\n[Current score: {session['current_score']}/100. Output ONLY valid JSON.]",
-    })
+    judgement = await judge_with_jev(brief, conversation, user_text, score, state, session["language"])
 
-    # Get LLM response
-    raw = await sarvam_llm(llm_messages, temperature=0.7)
-    parsed = parse_llm_json(raw)
-
-    counterpart_text = parsed.get("response", "...")
-    if not isinstance(counterpart_text, str) or not counterpart_text.strip():
-        counterpart_text = "..."
-    try:
-        score_delta = max(-25, min(25, int(parsed.get("score_delta", 0))))
-    except (ValueError, TypeError, OverflowError):
-        score_delta = 0
-    emotion = parsed.get("emotion", "angry")
-    if not isinstance(emotion, str) or emotion not in EMOTION_VOICE_PARAMS:
-        emotion = "angry"
-
-    # Update score
-    new_score = max(0, min(100, session["current_score"] + score_delta))
-
-    # Determine status
-    if new_score >= 90:
-        status = "patched_up"
-    elif new_score <= 0:
-        status = "blocked"
+    if judgement:
+        # Code owns the state change; the actor plays the already-updated counterpart.
+        receptiveness_delta = apply_gain(judgement["receptiveness_delta"], difficulty)
+        new_score = clamp_int(score + receptiveness_delta, 0, 100)
+        new_state = {
+            "trust": clamp_int(state["trust"] + judgement["trust_delta"], 0, 100),
+            "defensiveness": clamp_int(state["defensiveness"] + judgement["defensiveness_delta"], 0, 100),
+        }
+        actor_messages = build_actor_messages(session["system_prompt"], conversation, user_text, new_score, new_state, self_judging=False)
+        coach_messages = build_coach_messages(brief, conversation, user_text, scores=judgement["scores"])
     else:
-        status = "ongoing"
+        actor_messages = build_actor_messages(session["system_prompt"], conversation, user_text, score, state, self_judging=True)
+        coach_messages = build_coach_messages(brief, conversation, user_text)
 
-    # TTS with emotion-based voice params
-    emo_params = EMOTION_VOICE_PARAMS.get(emotion, {"pace": 1.0, "temperature": 0.6})
-    final_pace = (diff_config["tts_pace"] + emo_params["pace"]) / 2
-    final_temp = (diff_config["tts_temperature"] + emo_params["temperature"]) / 2
+    raw_actor, raw_coach = await asyncio.gather(
+        sarvam_llm(actor_messages, temperature=0.7, max_tokens=300),
+        sarvam_llm(coach_messages, temperature=0.3, max_tokens=400),
+        return_exceptions=True,
+    )
+    if isinstance(raw_actor, BaseException):
+        raise raw_actor
+    actor = parse_actor(raw_actor, EMOTION_VOICE_PARAMS, DEFAULT_EMOTION)
+    if isinstance(raw_coach, BaseException):
+        log.warning("Coach call failed; turn continues without a note: %s", raw_coach)
+        coach = None
+    else:
+        coach = parse_coach(raw_coach, dimensions)
 
-    counterpart_audio = await sarvam_tts(
-        text=counterpart_text,
-        speaker=persona["voice_id"],
+    if judgement:
+        coach = {**(coach or {"note": "", "stronger": ""}), "scores": judgement["scores"]}
+    else:
+        receptiveness_delta = actor["receptiveness_delta"]
+        new_score = clamp_int(score + receptiveness_delta, 0, 100)
+        new_state = {
+            "trust": clamp_int(state["trust"] + actor["trust_delta"], 0, 100),
+            "defensiveness": clamp_int(state["defensiveness"] + actor["defensiveness_delta"], 0, 100),
+        }
+    status = status_for(new_score)
+
+    pace, temperature = voice_params(difficulty, actor["emotion"], new_state)
+    counterpart_audio = await tts_or_502(
+        text=actor["response"],
+        speaker=brief["counterpart"]["voice_id"],
         language=session["language"],
-        pace=final_pace,
-        temperature=final_temp,
+        pace=pace,
+        temperature=temperature,
     )
 
-    # Update conversation history
-    turn_number = len([t for t in conversation if t["role"] == "user"]) + 1
-    conversation.append({"role": "user", "text": user_text, "timestamp": datetime.now(timezone.utc).isoformat()})
+    turn_number = sum(1 for turn in conversation if turn["role"] == "user") + 1
     conversation.append({
-        "role": "counterpart", "text": counterpart_text, "emotion": emotion,
-        "score_delta": score_delta, "timestamp": datetime.now(timezone.utc).isoformat(),
+        "role": "user", "text": user_text, "turn_number": turn_number, "coach": coach,
+        "judged_by": "jev" if judgement else "actor", "timestamp": now_iso(),
     })
+    conversation.append({
+        "role": "counterpart", "text": actor["response"], "emotion": actor["emotion"],
+        "score_delta": receptiveness_delta,
+        "state": {**new_state, "receptiveness": new_score}, "timestamp": now_iso(),
+    })
+    skill_scores = skill_averages(conversation, dimensions)
 
-    # Persist
-    db_update_session(session_id, {
+    updates = {
         "current_score": new_score,
         "status": status,
         "conversation": conversation,
-    })
+        "counterpart_state": new_state,
+        "skill_scores": skill_scores,
+    }
+    db_update_session(session_id, updates)
+    if status != "ongoing":
+        # Stats are recorded exactly once: here when the conversation resolves itself,
+        # or in /end when the user quits.
+        db_record_stats({**session, **updates}, turn_number)
 
     return RespondResponse(
         user_text=user_text,
-        counterpart_text=counterpart_text,
+        counterpart_text=actor["response"],
         counterpart_audio=counterpart_audio,
-        score_delta=score_delta,
+        score_delta=receptiveness_delta,
         current_score=new_score,
-        emotion=emotion,
+        emotion=actor["emotion"],
         status=status,
         turn_number=turn_number,
+        coach=CoachNote(**coach) if coach else None,
+        skill_scores=skill_scores,
+        counterpart_state=new_state,
+        judged_by="jev" if judgement else "actor",
+    )
+
+
+async def start_from_brief(brief: dict, difficulty: str, language: str, previous_session_id: Optional[str] = None) -> SessionStartResponse:
+    diff = DIFFICULTY_CONFIG[difficulty]
+    counterpart = brief["counterpart"]
+    conversation_type = brief["conversation_type"]
+
+    # Built briefs are English; say the opening line in the session language (Mayura).
+    opening = brief["opening_line"]
+    if brief["kind"] != "classic" and language != "en-IN":
+        try:
+            opening = await sarvam_translate(
+                opening, language, speaker_gender="Male" if counterpart["gender"] == "male" else "Female",
+            )
+        except Exception as e:  # English opening is an acceptable fallback
+            log.warning("Opening-line translation failed; using English: %s", e)
+
+    opening_audio = await tts_or_502(
+        text=opening, speaker=counterpart["voice_id"], language=language,
+        pace=diff["tts_pace"], temperature=diff["tts_temperature"],
+    )
+
+    state = initial_state(difficulty)
+    session_id = str(uuid.uuid4())
+    db_create_session({
+        "id": session_id,
+        "persona_id": brief.get("persona_id"),
+        "scenario_id": brief.get("preset_id") or "custom",
+        "difficulty": difficulty,
+        "language": language,
+        "current_score": diff["starting_score"],
+        "status": "ongoing",
+        "conversation": [{
+            "role": "counterpart", "text": opening,
+            "emotion": "angry" if brief["kind"] == "classic" else DEFAULT_EMOTION,
+            "score_delta": 0, "state": {**state, "receptiveness": diff["starting_score"]}, "timestamp": now_iso(),
+        }],
+        "system_prompt": build_actor_prompt(brief, difficulty, language),
+        "brief": brief,
+        "conversation_type": conversation_type,
+        "counterpart_state": state,
+        "skill_scores": {},
+        "previous_session_id": previous_session_id,
+    })
+
+    return SessionStartResponse(
+        session_id=session_id,
+        opening_message=opening,
+        opening_audio=opening_audio,
+        initial_score=diff["starting_score"],
+        kind=brief["kind"],
+        counterpart_name=counterpart["name"],
+        counterpart_role=counterpart["role"],
+        counterpart_emoji=brief.get("emoji") or "🗣️",
+        scenario_title=brief.get("title") or "Your conversation",
+        difficulty_name=diff["name"],
+        conversation_type=conversation_type,
+        meter_label=RUBRICS[conversation_type]["meter_label"],
+        dimensions=dimension_list(conversation_type),
+        goal=brief.get("user_goal") or "",
+        counterpart_state=state,
     )
 
 
@@ -713,117 +539,175 @@ async def process_user_message(session_id: str, user_text: str) -> RespondRespon
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "supabase": supabase is not None}
+    return {
+        "status": "ok",
+        "supabase": db.supabase is not None,
+        "storage": db.storage_mode(),
+        "judge": "jev" if judge_enabled() else "actor",
+    }
+
+
+@app.get("/api/catalog")
+async def get_catalog():
+    """Everything the setup screen needs in one call."""
+    return {
+        "presets": [
+            {
+                "id": preset["id"], "title": preset["title"], "emoji": preset["emoji"],
+                "description": preset["description"], "conversation_type": preset["conversation_type"],
+                "intake": preset_intake(preset["id"]),
+            }
+            for preset in PRESETS.values()
+        ],
+        "personas": [
+            {"id": p["id"], "name": p["name"], "title": p["title"], "emoji": p["emoji"], "description": p["description"]}
+            for p in PERSONAS.values()
+        ],
+        "scenarios": [
+            {"id": s["id"], "title": s["title"], "emoji": s["emoji"], "description": s["description"]}
+            for s in SCENARIOS.values()
+        ],
+        "temperaments": [
+            {"id": key, "name": DIFFICULTY_CONFIG[key]["name"], "description": DIFFICULTY_CONFIG[key]["description"],
+             "starting_score": DIFFICULTY_CONFIG[key]["starting_score"]}
+            for key in TEMPERAMENT_IDS
+        ],
+        "difficulties": [
+            {"id": key, "name": DIFFICULTY_CONFIG[key]["name"], "description": DIFFICULTY_CONFIG[key]["description"],
+             "starting_score": DIFFICULTY_CONFIG[key]["starting_score"]}
+            for key in CLASSIC_DIFFICULTY_IDS
+        ],
+        "languages": LANGUAGES,
+        "rubrics": {
+            key: {"name": rubric["name"], "meter_label": rubric["meter_label"], "dimensions": dimension_list(key)}
+            for key, rubric in RUBRICS.items()
+        },
+        "judge": "jev" if judge_enabled() else "actor",
+    }
 
 
 @app.get("/api/personas")
 async def get_personas():
-    return {"personas": [
-        {"id": p["id"], "name": p["name"], "title": p["title"], "emoji": p["emoji"], "description": p["description"]}
-        for p in PERSONAS.values()
-    ]}
+    return {"personas": (await get_catalog())["personas"]}
 
 
 @app.get("/api/scenarios")
 async def get_scenarios():
-    return {"scenarios": [
-        {"id": s["id"], "title": s["title"], "emoji": s["emoji"], "description": s["description"]}
-        for s in SCENARIOS.values()
-    ]}
+    return {"scenarios": (await get_catalog())["scenarios"]}
 
 
 @app.get("/api/difficulties")
 async def get_difficulties():
-    return {"difficulties": [
-        {"id": k, "name": v["name"], "starting_score": v["starting_score"]}
-        for k, v in DIFFICULTY_CONFIG.items()
-    ]}
+    catalog = await get_catalog()
+    return {"difficulties": catalog["difficulties"] + catalog["temperaments"]}
 
 
 @app.get("/api/leaderboard")
 async def get_leaderboard():
-    """Top 10 patch-up scores."""
-    global _supabase_failed
-    if supabase and not _supabase_failed:
-        try:
-            result = supabase.table("game_stats") \
-                .select("*") \
-                .eq("status", "patched_up") \
-                .order("final_score", desc=True) \
-                .limit(10) \
-                .execute()
-            return {"leaderboard": result.data or []}
-        except (PostgrestAPIError, Exception):
-            _supabase_failed = True
-    return {"leaderboard": []}
+    return {"leaderboard": db_leaderboard()}
+
+
+@app.post("/api/scenario/build", response_model=ScenarioBuildResponse)
+async def build_scenario(req: ScenarioBuildRequest):
+    """Turn an intake into a counterpart brief. Presets with untouched intake skip the LLM.
+    Sarvam-M writes the brief; Jev (when configured) classifies safety and conversation type in parallel."""
+    if req.preset_id and req.preset_id not in PRESETS:
+        raise HTTPException(400, f"Unknown preset: {req.preset_id}")
+    intake = normalized_intake(req.intake.model_dump()) if req.intake else None
+
+    if req.preset_id and (intake is None or intake == normalized_intake(preset_intake(req.preset_id))):
+        return ScenarioBuildResponse(brief=preset_brief(req.preset_id), built_by="preset", judged_by="preset")
+    if intake is None:
+        raise HTTPException(400, "Provide a preset_id or an intake")
+
+    intake_text = " ".join([*intake["counterpart"].values(), intake["user_goal"], intake["user_fears"], intake["history"]])
+    category = screen_intake_text(intake_text)
+    if category:
+        return ScenarioBuildResponse(safety=safety_payload(category), built_by="screen", judged_by="screen")
+    if not (intake["user_goal"] or intake["counterpart"]["role"] or intake["history"]):
+        raise HTTPException(400, "Tell us at least who the other person is and what you need from them")
+
+    preset = PRESETS.get(req.preset_id) if req.preset_id else None
+    raw, verdict = await asyncio.gather(
+        sarvam_llm(build_brief_messages(intake, preset), temperature=0.8, max_tokens=1024),
+        judge_intake(intake) if judge_enabled() else _none(),
+        return_exceptions=True,
+    )
+    if isinstance(raw, BaseException):
+        log.warning("Scenario build failed: %s", raw)
+        raise HTTPException(502, "Could not build the scenario. Try again in a moment.")
+    if isinstance(verdict, BaseException):
+        log.warning("Jev intake judgement failed; using the builder's own classification: %s", verdict)
+        verdict = None
+    judged_by = "jev" if verdict else "llm"
+
+    default_type = preset["conversation_type"] if preset else guess_conversation_type(intake_text)
+    brief = parse_brief(raw, intake, valid_types=set(RUBRICS), default_type=default_type)
+    if brief is None:
+        raise HTTPException(502, "The scenario builder returned something unusable. Try again, or simplify the intake.")
+
+    safety_category = (verdict or {}).get("safety_category") or brief["safety_category"]
+    if safety_category:
+        return ScenarioBuildResponse(safety=safety_payload(safety_category), built_by="llm", judged_by=judged_by)
+
+    brief["kind"] = "preset" if preset else "custom"
+    if preset:
+        brief["preset_id"] = preset["id"]
+        brief["emoji"] = preset["emoji"]
+        brief["conversation_type"] = preset["conversation_type"]  # editing a preset doesn't change what it is
+    elif verdict and verdict.get("conversation_type"):
+        brief["conversation_type"] = verdict["conversation_type"]
+    brief["counterpart"]["voice_id"] = pick_voice(brief["counterpart"]["name"], brief["counterpart"]["gender"])
+    brief.pop("safety_category", None)
+    return ScenarioBuildResponse(brief=brief, built_by="llm", judged_by=judged_by)
 
 
 @app.post("/api/session/start", response_model=SessionStartResponse)
 async def start_session(req: SessionStartRequest):
-    if req.persona_id not in PERSONAS:
-        raise HTTPException(400, f"Unknown persona: {req.persona_id}")
-    if req.scenario_id not in SCENARIOS:
-        raise HTTPException(400, f"Unknown scenario: {req.scenario_id}")
     if req.difficulty not in DIFFICULTY_CONFIG:
         raise HTTPException(400, f"Unknown difficulty: {req.difficulty}")
+    if req.language not in LANGUAGE_IDS:
+        raise HTTPException(400, f"Unsupported language: {req.language}")
 
-    persona = PERSONAS[req.persona_id]
-    scenario = SCENARIOS[req.scenario_id]
-    diff = DIFFICULTY_CONFIG[req.difficulty]
+    if req.brief is not None:
+        kind = req.brief.get("kind")
+        if kind == "classic":
+            persona_id, scenario_id = req.brief.get("persona_id"), req.brief.get("preset_id")
+            if persona_id not in PERSONAS or scenario_id not in SCENARIOS:
+                raise HTTPException(400, "Unknown classic persona or scenario")
+            brief = classic_brief(persona_id, scenario_id)
+        else:
+            brief = brief_from_data(req.brief, intake={}, valid_types=set(RUBRICS),
+                                    default_type="feedback", kind=kind or "custom")
+            if brief is None:
+                raise HTTPException(400, "Brief is missing a counterpart or an opening line")
+            brief.pop("safety_category", None)
+    elif req.persona_id and req.scenario_id:
+        if req.persona_id not in PERSONAS:
+            raise HTTPException(400, f"Unknown persona: {req.persona_id}")
+        if req.scenario_id not in SCENARIOS:
+            raise HTTPException(400, f"Unknown scenario: {req.scenario_id}")
+        brief = classic_brief(req.persona_id, req.scenario_id)
+    else:
+        raise HTTPException(400, "Provide a brief, or persona_id and scenario_id")
 
-    opening = scenario["opening_lines"].get(req.persona_id, list(scenario["opening_lines"].values())[0])
+    if req.previous_session_id and not db_get_session(req.previous_session_id):
+        req.previous_session_id = None
+    return await start_from_brief(brief, req.difficulty, req.language, req.previous_session_id)
 
-    # Generate opening audio
-    try:
-        opening_audio = await sarvam_tts(
-            text=opening, speaker=persona["voice_id"],
-            language=req.language, pace=diff["tts_pace"], temperature=diff["tts_temperature"],
-        )
-    except httpx.HTTPStatusError as e:
-        detail = "Sarvam TTS failed."
-        if e.response is not None:
-            try:
-                err = e.response.json()
-                detail = err.get("error", {}).get("message", detail) or str(err)
-            except Exception:
-                detail = e.response.text or detail
-        raise HTTPException(status_code=502, detail=detail)
 
-    session_id = str(uuid.uuid4())
-    session_data = {
-        "id": session_id,
-        "persona_id": req.persona_id,
-        "scenario_id": req.scenario_id,
-        "difficulty": req.difficulty,
-        "language": req.language,
-        "current_score": diff["starting_score"],
-        "status": "ongoing",
-        "conversation": [
-            {"role": "counterpart", "text": opening, "emotion": "angry", "score_delta": 0,
-             "timestamp": datetime.now(timezone.utc).isoformat()},
-        ],
-        "system_prompt": build_system_prompt(req.persona_id, req.scenario_id, req.difficulty, req.language),
-    }
-    db_create_session(session_data)
-
-    return SessionStartResponse(
-        session_id=session_id, opening_message=opening, opening_audio=opening_audio,
-        initial_score=diff["starting_score"], persona_name=persona["name"],
-        scenario_title=scenario["title"], difficulty_name=diff["name"],
-    )
+@app.get("/api/session/{session_id}", response_model=SessionSnapshot)
+async def get_session(session_id: str):
+    return snapshot(get_session_or_404(session_id))
 
 
 @app.post("/api/session/{session_id}/respond", response_model=RespondResponse)
 async def respond_voice(session_id: str, audio: UploadFile = File(...)):
-    """Voice input → STT → LLM → TTS."""
-    session = db_get_session(session_id)
-    if not session:
-        raise HTTPException(404, "Session not found")
-
+    """Voice input → STT → judge → actor + coach → TTS."""
+    session = get_session_or_404(session_id)
     audio_bytes = await audio.read()
-    content_type = audio.content_type or ""
     try:
-        user_text = await sarvam_stt(audio_bytes, language=session["language"], content_type=content_type)
+        user_text = await sarvam_stt(audio_bytes, language=session["language"], content_type=audio.content_type or "")
     except ValueError as e:
         raise HTTPException(400, str(e))  # e.g. "Audio too short..."
     except httpx.HTTPStatusError as e:
@@ -837,7 +721,6 @@ async def respond_voice(session_id: str, audio: UploadFile = File(...)):
         raise HTTPException(502, detail)
     if not user_text.strip():
         user_text = "(silence)"
-
     return await process_user_message(session_id, user_text)
 
 
@@ -847,60 +730,112 @@ async def respond_text(session_id: str, text: str = Form(...)):
     return await process_user_message(session_id, text)
 
 
+@app.post("/api/session/{session_id}/rewind", response_model=SessionSnapshot)
+async def rewind_session(session_id: str, req: RewindRequest):
+    """Drop everything from user turn N onward and reopen the session there."""
+    session = get_session_or_404(session_id)
+    conversation = session["conversation"]
+    user_indexes = [index for index, turn in enumerate(conversation) if turn["role"] == "user"]
+    if req.turn_number < 1 or req.turn_number > len(user_indexes):
+        raise HTTPException(400, f"turn_number must be between 1 and {len(user_indexes)}")
+
+    kept = conversation[:user_indexes[req.turn_number - 1]]
+    score, state = state_at(kept, session["difficulty"])
+    dimensions = list(RUBRICS[session_brief(session)["conversation_type"]]["dimensions"])
+    updates = {
+        "conversation": kept, "current_score": score, "status": "ongoing",
+        "counterpart_state": state, "skill_scores": skill_averages(kept, dimensions),
+    }
+    db_update_session(session_id, updates)
+    return snapshot({**session, **updates})
+
+
+@app.post("/api/session/{session_id}/restart", response_model=SessionStartResponse)
+async def restart_session(session_id: str):
+    """Run the same scenario again; the new session remembers this one for score comparison."""
+    session = get_session_or_404(session_id)
+    if session["status"] == "ongoing":
+        db_update_session(session_id, {"status": "quit"})
+    return await start_from_brief(session_brief(session), session["difficulty"], session["language"], previous_session_id=session_id)
+
+
+@app.delete("/api/session/{session_id}")
+async def delete_session(session_id: str):
+    if not db_delete_session(session_id):
+        raise HTTPException(404, "Session not found")
+    return {"deleted": True}
+
+
 @app.post("/api/session/{session_id}/end", response_model=SessionEndResponse)
 async def end_session_endpoint(session_id: str):
-    session = db_get_session(session_id)
-    if not session:
-        raise HTTPException(404, "Session not found")
-
-    if session["status"] == "ongoing":
+    session = get_session_or_404(session_id)
+    quitting = session["status"] == "ongoing"
+    if quitting:
         db_update_session(session_id, {"status": "quit"})
         session["status"] = "quit"
 
+    brief = session_brief(session)
+    conversation_type = brief["conversation_type"]
+    dimensions = list(RUBRICS[conversation_type]["dimensions"])
     conversation = session["conversation"]
-    user_turns = [t for t in conversation if t["role"] == "user"]
-    counterpart_turns = [t for i, t in enumerate(conversation)
-                         if t["role"] == "counterpart" and "score_delta" in t
-                         and i > 0 and conversation[i - 1]["role"] == "user"]
+    user_turns = [turn for turn in conversation if turn["role"] == "user"]
+    scored_turns = [
+        turn for index, turn in enumerate(conversation)
+        if turn["role"] == "counterpart" and "score_delta" in turn and index > 0 and conversation[index - 1]["role"] == "user"
+    ]
 
     best_resp = worst_resp = None
-    if counterpart_turns:
-        best_counterpart = max(counterpart_turns, key=lambda t: t.get("score_delta", 0))
-        worst_counterpart = min(counterpart_turns, key=lambda t: t.get("score_delta", 0))
-        best_idx = conversation.index(best_counterpart)
-        worst_idx = conversation.index(worst_counterpart)
-        if best_idx > 0 and conversation[best_idx - 1]["role"] == "user":
-            best_resp = conversation[best_idx - 1]["text"]
-        if worst_idx > 0 and conversation[worst_idx - 1]["role"] == "user":
-            worst_resp = conversation[worst_idx - 1]["text"]
+    if scored_turns:
+        best = max(scored_turns, key=lambda turn: turn.get("score_delta", 0))
+        worst = min(scored_turns, key=lambda turn: turn.get("score_delta", 0))
+        best_resp = conversation[conversation.index(best) - 1]["text"]
+        worst_resp = conversation[conversation.index(worst) - 1]["text"]
 
     score = session["current_score"]
-    if score >= 90: verdict = "🎉 PATCHED UP! She forgave you!"
-    elif score >= 70: verdict = "😊 Almost there! She's softening up."
-    elif score >= 40: verdict = "😐 Still naraaz. Better luck next time."
-    elif score >= 20: verdict = "😤 You made it worse. Much worse."
-    else: verdict = "💔 BLOCKED. She's done."
+    skill_scores = session.get("skill_scores") or skill_averages(conversation, dimensions)
 
-    # Generate tips
     try:
-        tips_raw = await sarvam_llm([{"role": "user", "content": (
-            f"A user rehearsed a conversation after: {SCENARIOS[session['scenario_id']]['description']}. "
-            f"Their responses were: {[t['text'] for t in user_turns]}. Score: {score}/100. "
-            f"Give 3 short tips (one sentence each) on what the user could do better. Reply as JSON array: [\"tip1\",\"tip2\",\"tip3\"]"
-        )}], temperature=0.5)
+        tips_raw = await sarvam_llm(
+            build_debrief_messages(brief, [turn["text"] for turn in user_turns], skill_scores, score),
+            temperature=0.5,
+        )
         tips = parse_tips(tips_raw)
-    except Exception:
+    except Exception as e:
+        log.warning("Debrief tips failed; using defaults: %s", e)
         tips = [
-            "Acknowledge her feelings before explaining yourself",
-            "Be specific about what you did wrong — not just 'sorry'",
-            "Show a concrete plan for how you'll do better",
+            "Acknowledge their position before explaining yours",
+            "Be specific about what you want and what you'll do, not just how you feel",
+            "When they push back, answer the objection instead of repeating yourself",
         ]
 
-    # Record stats
-    db_record_stats(session_id, session["persona_id"], session["scenario_id"],
-                    session["difficulty"], score, session["status"], len(user_turns))
+    previous_score = None
+    if session.get("previous_session_id"):
+        previous = db_get_session(session["previous_session_id"])
+        if previous:
+            previous_score = previous["current_score"]
+
+    if quitting:
+        db_record_stats(session, len(user_turns))
 
     return SessionEndResponse(
-        final_score=score, verdict=verdict, total_turns=len(user_turns),
-        best_response=best_resp, worst_response=worst_resp, tips=tips[:3],
+        final_score=score,
+        verdict=verdict_for(score, brief["kind"]),
+        total_turns=len(user_turns),
+        best_response=best_resp,
+        worst_response=worst_resp,
+        tips=tips[:3],
+        status=session["status"],
+        kind=brief["kind"],
+        conversation_type=conversation_type,
+        goal=brief.get("user_goal") or "",
+        meter_label=RUBRICS[conversation_type]["meter_label"],
+        dimensions=dimension_list(conversation_type),
+        skill_scores=skill_scores,
+        transcript=conversation,
+        reveal={
+            "hidden_motivations": brief.get("hidden_motivations", []),
+            "curveballs": brief.get("curveballs", []),
+        },
+        previous_score=previous_score,
+        counterpart_name=brief["counterpart"]["name"],
     )

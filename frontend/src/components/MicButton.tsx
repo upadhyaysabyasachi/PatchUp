@@ -1,8 +1,8 @@
 "use client";
 
-export default function MicButton({ isRecording, isProcessing, isPlaying, disabled, onTap }: {
+export default function MicButton({ isRecording, isProcessing, isPlaying, disabled, onTap, speakerName }: {
   isRecording: boolean; isProcessing: boolean; isPlaying: boolean;
-  disabled: boolean; onTap: () => void;
+  disabled: boolean; onTap: () => void; speakerName?: string;
 }) {
   if (isProcessing) {
     return (
@@ -14,7 +14,7 @@ export default function MicButton({ isRecording, isProcessing, isPlaying, disabl
             ))}
           </div>
         </div>
-        <span className="text-xs text-patch-soft/50">{isPlaying ? "She's speaking..." : "Thinking..."}</span>
+        <span className="text-xs text-patch-soft/50">{isPlaying ? `${speakerName || "They"}'s speaking...` : "Thinking..."}</span>
       </div>
     );
   }
@@ -36,12 +36,10 @@ export default function MicButton({ isRecording, isProcessing, isPlaying, disabl
             ${disabled ? "opacity-30 cursor-not-allowed" : "cursor-pointer active:scale-95"}`}
         >
           {isRecording ? (
-            /* Stop/square icon when recording */
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="#fff" stroke="none">
               <rect x="6" y="6" width="12" height="12" rx="2" />
             </svg>
           ) : (
-            /* Mic icon when idle */
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none"
               stroke="#fb7185" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />

@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PatchUp 🩹 — Practice Patching Up",
-  description: "Voice-powered relationship simulator powered by Sarvam Bulbul V3.",
+  title: "PatchUp 🩹 — Rehearse the hard conversation",
+  description: "Practise difficult conversations out loud with a voice counterpart that pushes back and a coach on every turn. Powered by Sarvam AI.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

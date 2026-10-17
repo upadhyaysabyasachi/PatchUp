@@ -14,20 +14,20 @@ export default function HomePage() {
           <h1 className="font-display text-5xl sm:text-6xl font-bold text-patch-soft tracking-tight">
             Patch<span className="text-patch-accent">Up</span>
           </h1>
-          <p className="mt-3 text-lg text-patch-soft/60 font-body">Practice before you patch up.</p>
-          <p className="text-sm text-patch-soft/40 font-body italic mt-1">Because second chances don&apos;t come with a tutorial.</p>
+          <p className="mt-3 text-lg text-patch-soft/60 font-body">Rehearse the conversation before it happens.</p>
+          <p className="text-sm text-patch-soft/40 font-body italic mt-1">The raise. The breakup. The talk with your father. Out loud, with someone who pushes back.</p>
         </div>
         <div className="flex flex-wrap justify-center gap-2 mb-10">
-          {["🗣️ Voice Conversations", "🎭 Multiple Personas", "🔥 Difficulty Levels", "💕 Patch-Up Meter"].map((f) => (
+          {["🗣️ Voice, not text", "🎭 Any counterpart", "🧭 Coach on every turn", "↺ Rewind and retry"].map((f) => (
             <span key={f} className="px-3 py-1.5 text-xs font-medium bg-patch-card border border-patch-border rounded-full text-patch-soft/70">{f}</span>
           ))}
         </div>
         <button onClick={() => router.push("/setup")}
           className="group relative px-8 py-4 bg-patch-accent rounded-2xl font-body font-semibold text-white text-lg hover:bg-patch-accent/90 transition-all duration-200 animate-glow-pulse hover:scale-105 active:scale-95">
-          Start Practicing <span className="ml-2 inline-block group-hover:translate-x-1 transition-transform">→</span>
+          Start rehearsing <span className="ml-2 inline-block group-hover:translate-x-1 transition-transform">→</span>
         </button>
         <div className="mt-12 flex items-center justify-center gap-2 text-xs text-patch-soft/30">
-          <span>Powered by</span><span className="font-semibold text-patch-soft/50">Sarvam AI — Bulbul V3</span><span>🇮🇳</span>
+          <span>Powered by</span><span className="font-semibold text-patch-soft/50">Sarvam AI — Bulbul V3 · Saarika · Sarvam-M · Mayura</span><span>🇮🇳</span>
         </div>
         <div className="mt-4 inline-block px-3 py-1 bg-patch-card border border-patch-border rounded-full">
           <span className="text-[10px] text-patch-soft/40 tracking-wider uppercase">#TheMicIsYours · Build with Bulbul Challenge</span>
