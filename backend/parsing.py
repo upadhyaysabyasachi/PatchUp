@@ -20,9 +20,11 @@ def _fix_json_quirks(text: str) -> str:
     )
 
 
-def parse_json_payload(raw: str):
-    """Decode an object or array, including fenced or prose-wrapped JSON."""
-    text = raw.strip()
+def parse_json_payload(raw) -> object:
+    """Decode an object or array, including fenced or prose-wrapped JSON. Raises ValueError if there is none."""
+    text = (raw if isinstance(raw, str) else "").strip()
+    if not text:
+        raise ValueError("Empty LLM output")
     if text.startswith("```"):
         lines = text.split("\n")[1:]
         if lines and lines[-1].strip() == "```":
@@ -79,7 +81,7 @@ def parse_actor(raw: str, valid_emotions, default_emotion: str) -> dict:
     data = parse_object(raw)
     if data is None:
         return {
-            "response": raw.strip()[:200] or "...",
+            "response": (raw.strip()[:200] if isinstance(raw, str) else "") or "...",
             "emotion": default_emotion,
             "receptiveness_delta": 0,
             "trust_delta": 0,

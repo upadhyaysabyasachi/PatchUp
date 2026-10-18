@@ -440,7 +440,7 @@ async def process_user_message(session_id: str, user_text: str, stt_provider: Op
 
     raw_actor, raw_coach = await asyncio.gather(
         sarvam_llm(actor_messages, temperature=0.7, max_tokens=400, model=SARVAM_ACTOR_MODEL),
-        sarvam_llm(coach_messages, temperature=0.3, max_tokens=600, reasoning="low"),
+        sarvam_llm(coach_messages, temperature=0.3, max_tokens=600),
         return_exceptions=True,
     )
     if isinstance(raw_actor, BaseException):
@@ -676,7 +676,7 @@ async def build_scenario(req: ScenarioBuildRequest):
 
     preset = PRESETS.get(req.preset_id) if req.preset_id else None
     raw, verdict = await asyncio.gather(
-        sarvam_llm(build_brief_messages(intake, preset), temperature=0.8, max_tokens=1500, reasoning="low"),
+        sarvam_llm(build_brief_messages(intake, preset), temperature=0.8, max_tokens=2000),
         judge_intake(intake) if judge_enabled() else _none(),
         return_exceptions=True,
     )
@@ -848,7 +848,7 @@ async def end_session_endpoint(session_id: str):
     try:
         tips_raw = await sarvam_llm(
             build_debrief_messages(brief, [turn["text"] for turn in user_turns], skill_scores, score),
-            temperature=0.5, max_tokens=600, reasoning="low",
+            temperature=0.5, max_tokens=600,
         )
         tips = parse_tips(tips_raw)
     except Exception as e:

@@ -119,7 +119,22 @@ async def sarvam_llm(
         if resp.status_code != 200:
             log.warning("Sarvam LLM error %s: %s", resp.status_code, resp.text)
             resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        return completion_text(resp.json())
+
+
+def completion_text(data: dict) -> str:
+    """The assistant text of a chat completion, or "" when the model returned none
+    (e.g. reasoning used up max_tokens). Callers' parsers treat "" as 'no usable answer'."""
+    choices = data.get("choices") or [{}]
+    choice = choices[0] or {}
+    content = (choice.get("message") or {}).get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    log.warning(
+        "Sarvam LLM returned no content (finish_reason=%s, usage=%s)",
+        choice.get("finish_reason"), data.get("usage"),
+    )
+    return ""
 
 
 async def sarvam_translate(

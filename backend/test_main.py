@@ -51,6 +51,20 @@ class ParsingTests(unittest.TestCase):
                 self.assertEqual(parsed["response"], "Cost: +20")
                 self.assertEqual(parsed["emotion"], "firm")
 
+    def test_empty_completions_never_crash(self):
+        import sarvam
+        self.assertEqual(sarvam.completion_text({"choices": [{"message": {"content": None}, "finish_reason": "length"}]}), "")
+        self.assertEqual(sarvam.completion_text({"choices": [{"message": {"content": "  "}}]}), "")
+        self.assertEqual(sarvam.completion_text({}), "")
+        self.assertEqual(sarvam.completion_text({"choices": [{"message": {"content": "{}"}}]}), "{}")
+        for raw in (None, "", "   "):
+            with self.subTest(raw=raw):
+                self.assertIsNone(parsing.parse_coach(raw, ["clarity"]))
+                self.assertIsNone(parsing.parse_brief(raw, {}, set(content.RUBRICS), "feedback"))
+                self.assertEqual(parsing.parse_actor(raw, content.EMOTION_VOICE_PARAMS, "neutral")["response"], "...")
+                with self.assertRaises(ValueError):
+                    parsing.parse_tips(raw)
+
     def test_actor_invalid_shapes_fall_back(self):
         for raw in ('[]', 'null', '42', '"hello"', '{broken', ''):
             with self.subTest(raw=raw):
@@ -342,7 +356,7 @@ class JevConversationTests(SessionTestCase):
         self.assertEqual(actor_call.kwargs["model"], "sarvam-105b-conversations")
         self.assertIsNone(actor_call.kwargs.get("reasoning"))
         self.assertNotIn("model", coach_call.kwargs)
-        self.assertEqual(coach_call.kwargs["reasoning"], "low")
+        self.assertIsNone(coach_call.kwargs.get("reasoning"))  # reasoning tokens can swallow the content budget
         actor_messages = actor_call.args[0]
         self.assertIn("after hearing this", actor_messages[-1]["content"])
         self.assertIn("receptiveness: 70/100", actor_messages[-1]["content"])
