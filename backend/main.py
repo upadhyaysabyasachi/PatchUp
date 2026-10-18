@@ -193,6 +193,8 @@ class SessionSnapshot(BaseModel):
 
 class SessionEndResponse(BaseModel):
     final_score: int
+    start_score: int
+    outcome: str  # won | walked | close | progress | moved | flat | lost | worse
     verdict: str
     total_turns: int
     best_response: Optional[str] = None
@@ -297,18 +299,46 @@ def voice_params(difficulty: str, emotion: str, state: dict) -> tuple[float, flo
     return (diff["tts_pace"] + emo["pace"]) / 2 + nudge, (diff["tts_temperature"] + emo["temperature"]) / 2 + nudge
 
 
-def verdict_for(score: int, kind: str) -> str:
-    if kind == "classic":
-        if score >= GOAL_SCORE: return "🎉 PATCHED UP! She forgave you!"
-        if score >= 70: return "😊 Almost there! She's softening up."
-        if score >= 40: return "😐 Still naraaz. Better luck next time."
-        if score >= 20: return "😤 You made it worse. Much worse."
-        return "💔 BLOCKED. She's done."
-    if score >= GOAL_SCORE: return "You got there."
-    if score >= 70: return "Close. They were coming around."
-    if score >= 40: return "Stalemate. Nothing lost, nothing won."
-    if score >= 20: return "You lost ground."
-    return "They walked away."
+VERDICTS = {
+    # outcome: (rehearsal copy, classic copy)
+    "won": ("You got there.", "🎉 PATCHED UP! She forgave you!"),
+    "walked": ("They walked away.", "💔 BLOCKED. She's done."),
+    "close": ("Close. They were coming around.", "😊 Almost there! She's softening up."),
+    "progress": ("Real progress. They came a long way.", "🙂 She's listening. Real progress."),
+    "moved": ("You moved them.", "🙂 She's listening. Keep going."),
+    "flat": ("Stalemate. Nothing lost, nothing won.", "😐 Still naraaz. Nothing changed."),
+    "lost": ("You lost ground.", "😤 You made it worse."),
+    "worse": ("It got worse. They dug in.", "😤 You made it worse. Much worse."),
+}
+
+
+def outcome_for(score: int, start: int, status: str) -> str:
+    """Judge the run by where it ended and how far it moved, not by the absolute number alone."""
+    if status == "patched_up" or score >= GOAL_SCORE:
+        return "won"
+    if status == "blocked" or score <= 0:
+        return "walked"
+    if score >= 70:
+        return "close"
+    delta = score - start
+    if delta >= 20: return "progress"
+    if delta >= 8: return "moved"
+    if delta > -8: return "flat"
+    if delta > -20: return "lost"
+    return "worse"
+
+
+def verdict_for(outcome: str, kind: str) -> str:
+    return VERDICTS[outcome][1 if kind == "classic" else 0]
+
+
+def start_score(session: dict) -> int:
+    """Receptiveness at the opening line: from its snapshot, else the difficulty's starting value."""
+    conversation = session.get("conversation") or []
+    if conversation and isinstance(conversation[0].get("state"), dict):
+        return clamp_int(conversation[0]["state"].get("receptiveness"), 0, 100,
+                         DIFFICULTY_CONFIG[session["difficulty"]]["starting_score"])
+    return DIFFICULTY_CONFIG[session["difficulty"]]["starting_score"]
 
 
 def normalized_intake(intake: dict) -> dict:
@@ -868,9 +898,13 @@ async def end_session_endpoint(session_id: str):
     if quitting:
         db_record_stats(session, len(user_turns))
 
+    start = start_score(session)
+    outcome = outcome_for(score, start, session["status"])
     return SessionEndResponse(
         final_score=score,
-        verdict=verdict_for(score, brief["kind"]),
+        start_score=start,
+        outcome=outcome,
+        verdict=verdict_for(outcome, brief["kind"]),
         total_turns=len(user_turns),
         best_response=best_resp,
         worst_response=worst_resp,

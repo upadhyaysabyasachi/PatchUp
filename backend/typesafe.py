@@ -22,6 +22,8 @@ JEV_MODEL = "jev-latest"
 
 # Noul probability at or above which an intake is treated as unsafe to simulate.
 SAFETY_THRESHOLD = 0.6
+# Noul probability at or above which a conditional rubric dimension is scored this turn.
+APPLIES_THRESHOLD = 0.5
 MAX_RECEPTIVENESS_DELTA = 25
 MAX_DIAL_DELTA = 15
 TRANSCRIPT_WINDOW = 8
@@ -140,6 +142,17 @@ def turn_questions(brief: dict) -> dict:
             },
             "criteria": spec["levels"],
         }
+        if spec.get("applies_when"):
+            # Asked alongside the score; code drops the score when the precondition isn't met.
+            questions[f"applies_{dim}"] = {
+                "type": "noul",
+                "instructions": (
+                    f"Looking at `transcript` (everything before `latest_user_message`), is it true that "
+                    f"{spec['applies_when'].replace('the counterpart', cp['name'])}?"
+                ),
+                "criteria": {"true": "Yes, it has already happened in the transcript",
+                             "false": "No, nothing like that has happened yet"},
+            }
     return questions
 
 
@@ -151,14 +164,18 @@ async def judge_turn(brief: dict, conversation: list, user_text: str, score: int
         turn_state(brief, conversation, user_text, score, state, user_text_english),
         turn_questions(brief),
     )
+    scores, skipped = {}, []
+    for dim, spec in rubric["dimensions"].items():
+        if spec.get("applies_when") and _noul(answers, f"applies_{dim}") < APPLIES_THRESHOLD:
+            skipped.append(dim)  # nothing to handle yet; don't score it
+            continue
+        scores[dim] = score_to_ten(_score(answers, dim), len(spec["levels"]))
     return {
         "receptiveness_delta": score_to_delta(_score(answers, "movement"), len(MOVEMENT_LEVELS), MAX_RECEPTIVENESS_DELTA),
         "trust_delta": score_to_delta(_score(answers, "trust"), len(TRUST_LEVELS), MAX_DIAL_DELTA),
         "defensiveness_delta": score_to_delta(_score(answers, "defensiveness"), len(DEFENSIVENESS_LEVELS), MAX_DIAL_DELTA),
-        "scores": {
-            dim: score_to_ten(_score(answers, dim), len(spec["levels"]))
-            for dim, spec in rubric["dimensions"].items()
-        },
+        "scores": scores,
+        "skipped": skipped,
         "confidence": {
             key: answers[key].get("confidence")
             for key in ("movement", "trust", "defensiveness", *rubric["dimensions"])

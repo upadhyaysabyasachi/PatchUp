@@ -78,8 +78,9 @@ export interface SessionSnapshot {
   counterpart_state: CounterpartState; skill_scores: Record<string, number>;
   conversation: Turn[]; next_turn_number: number;
 }
+export type Outcome = "won" | "walked" | "close" | "progress" | "moved" | "flat" | "lost" | "worse";
 export interface SessionEndResponse {
-  final_score: number; verdict: string; total_turns: number;
+  final_score: number; start_score: number; outcome: Outcome; verdict: string; total_turns: number;
   best_response: string | null; worst_response: string | null; tips: string[];
   status: SessionStatus; kind: BriefKind; conversation_type: ConversationType; goal: string;
   meter_label: string; dimensions: Dimension[]; skill_scores: Record<string, number>;

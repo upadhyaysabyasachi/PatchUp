@@ -118,18 +118,27 @@ def build_coach_messages(brief: dict, conversation: list, user_text: str,
     without them it also self-scores."""
     rubric = RUBRICS[brief["conversation_type"]]
     cp = brief["counterpart"]
-    dims = "\n".join(f"- {key}: {spec['description']}" for key, spec in rubric["dimensions"].items())
-    if scores:
-        scored = ", ".join(f"{key} {value}/10" for key, value in scores.items())
-        weakest = min(scores, key=scores.get)
+    dims = "\n".join(
+        f"- {key}: {spec['description']}"
+        + (f" (only once {spec['applies_when']}; otherwise null)" if spec.get("applies_when") else "")
+        for key, spec in rubric["dimensions"].items()
+    )
+    if scores is not None:
+        scored = ", ".join(f"{key} {value}/10" for key, value in scores.items()) or "none applicable yet"
+        not_scored = [key for key in rubric["dimensions"] if key not in scores]
+        weakest = f" Weakest: {min(scores, key=scores.get)}." if scores else ""
+        skipped = f" Not applicable yet: {', '.join(not_scored)}." if not_scored else ""
         scoring_block = (
             f"The user's latest message has already been scored on these dimensions:\n{dims}\n"
-            f"Scores: {scored}. Weakest: {weakest}.\n\nWrite:"
+            f"Scores: {scored}.{weakest}{skipped}\n\nWrite:"
         )
         output = '{"note": "...", "stronger": "..."}'
     else:
-        score_keys = ", ".join(f'"{key}": <0-10>' for key in rubric["dimensions"])
-        scoring_block = f"Score ONLY the user's latest message, 0-10 on each dimension:\n{dims}\n\nThen write:"
+        score_keys = ", ".join(f'"{key}": <0-10 or null>' for key in rubric["dimensions"])
+        scoring_block = (
+            f"Score ONLY the user's latest message, 0-10 on each dimension. If a dimension cannot apply yet "
+            f"(the thing it responds to hasn't happened), use null instead of a low score:\n{dims}\n\nThen write:"
+        )
         output = f'{{"scores": {{{score_keys}}}, "note": "...", "stronger": "..."}}'
     system = f"""You are a communication coach watching a rehearsal. The user is practising: {rubric['name'].lower()}.
 Their goal: {brief.get('user_goal') or 'not specified'}

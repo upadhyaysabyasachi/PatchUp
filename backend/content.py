@@ -108,6 +108,8 @@ RUBRICS = {
             },
             "objection_handling": {
                 "description": "Hears the objection, acknowledges it, and answers it without caving or getting flustered",
+                # Only scored once there is an objection to handle.
+                "applies_when": "the counterpart has raised an objection, concern, condition, or counter-offer in the conversation so far",
                 "levels": [
                     "Caves, gets flustered, or ignores the objection",
                     "Repeats the ask without addressing the objection",
@@ -184,6 +186,8 @@ RUBRICS = {
             },
             "steadiness": {
                 "description": "Holds the decision under pushback, guilt, or bargaining without becoming cold",
+                # Only scored once the counterpart has pushed back on the news.
+                "applies_when": "the counterpart has pushed back, bargained, pleaded, or reacted emotionally to the user's decision in the conversation so far",
                 "levels": [
                     "Caves, reverses, or gives false hope",
                     "Wobbles under pushback, or over-explains",

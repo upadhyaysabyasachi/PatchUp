@@ -2,23 +2,33 @@
 import { useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { endSession, restartSession, deleteSession } from "@/lib/api";
-import type { SessionEndResponse, Turn } from "@/lib/api";
+import type { Outcome, SessionEndResponse, Turn } from "@/lib/api";
 import SkillMeter from "@/components/SkillMeter";
 import { EMOTION_LABELS } from "@/components/PatchMeter";
 
-function verdictFor(score: number, classic: boolean) {
-  if (classic) {
-    return score >= 90 ? { emoji: "🎉", title: "PATCHED UP!", color: "text-green-400", border: "border-green-400/20" }
-      : score >= 70 ? { emoji: "😊", title: "Almost There!", color: "text-amber-400", border: "border-amber-400/20" }
-      : score >= 40 ? { emoji: "😐", title: "Still Naraaz", color: "text-orange-400", border: "border-orange-400/20" }
-      : score >= 20 ? { emoji: "😤", title: "Made It Worse", color: "text-red-400", border: "border-red-400/20" }
-      : { emoji: "💔", title: "BLOCKED", color: "text-red-500", border: "border-red-500/20" };
-  }
-  return score >= 90 ? { emoji: "🎯", title: "You got there", color: "text-green-400", border: "border-green-400/20" }
-    : score >= 70 ? { emoji: "🙂", title: "Close", color: "text-amber-400", border: "border-amber-400/20" }
-    : score >= 40 ? { emoji: "😐", title: "Stalemate", color: "text-orange-400", border: "border-orange-400/20" }
-    : score >= 20 ? { emoji: "😬", title: "Lost ground", color: "text-red-400", border: "border-red-400/20" }
-    : { emoji: "🚪", title: "They walked away", color: "text-red-500", border: "border-red-500/20" };
+const GOOD = { color: "text-green-400", border: "border-green-400/20" };
+const OK = { color: "text-amber-400", border: "border-amber-400/20" };
+const MEH = { color: "text-orange-400", border: "border-orange-400/20" };
+const BAD = { color: "text-red-400", border: "border-red-400/20" };
+const WORST = { color: "text-red-500", border: "border-red-500/20" };
+
+// Title + emoji per backend outcome (judged on movement since the opening, not the raw number).
+const OUTCOMES: Record<Outcome, { emoji: string; title: string; classic: string } & typeof GOOD> = {
+  won: { emoji: "🎯", title: "You got there", classic: "PATCHED UP!", ...GOOD },
+  close: { emoji: "🙂", title: "Close", classic: "Almost There!", ...OK },
+  progress: { emoji: "📈", title: "Real progress", classic: "She's Listening", ...OK },
+  moved: { emoji: "🙂", title: "You moved them", classic: "She's Listening", ...OK },
+  flat: { emoji: "😐", title: "Stalemate", classic: "Still Naraaz", ...MEH },
+  lost: { emoji: "😬", title: "Lost ground", classic: "Made It Worse", ...BAD },
+  worse: { emoji: "😬", title: "It got worse", classic: "Made It Worse", ...BAD },
+  walked: { emoji: "🚪", title: "They walked away", classic: "BLOCKED", ...WORST },
+};
+
+function verdictFor(outcome: Outcome | undefined, score: number, classic: boolean) {
+  // Before the debrief loads we only have the score: approximate with the end states.
+  const key: Outcome = outcome ?? (score >= 90 ? "won" : score <= 0 ? "walked" : score >= 70 ? "close" : "flat");
+  const v = OUTCOMES[key];
+  return { ...v, emoji: classic && key === "won" ? "🎉" : classic && key === "walked" ? "💔" : v.emoji, title: classic ? v.classic : v.title };
 }
 
 function TranscriptTurn({ turn, counterpart }: { turn: Turn; counterpart: string }) {
@@ -100,7 +110,8 @@ export default function ResultContent() {
 
   const score = result?.final_score ?? local?.score ?? 0;
   const classic = result ? result.kind === "classic" : true;
-  const v = verdictFor(score, classic);
+  const v = verdictFor(result?.outcome, score, classic);
+  const moved = result ? score - result.start_score : 0;
   const name = result?.counterpart_name ?? "They";
   const userTurns = result?.transcript.filter(t => t.role === "user").length ?? 0;
 
@@ -119,7 +130,12 @@ export default function ResultContent() {
         <div className="text-xs text-patch-soft/40 uppercase tracking-wider mb-2">{result ? `${result.counterpart_name}'s ${result.meter_label.toLowerCase()}` : "Final score"}</div>
         <div className={`font-display text-6xl font-bold ${v.color}`}>{score}%</div>
         {result && (
-          <div className="text-sm text-patch-soft/50 mt-2 flex items-center justify-center gap-3">
+          <div className="text-sm text-patch-soft/50 mt-2 flex items-center justify-center gap-3 flex-wrap">
+            <span className="font-mono text-xs">
+              started at {result.start_score}% <span className={moved > 0 ? "text-green-400" : moved < 0 ? "text-red-400" : "text-patch-soft/40"}>
+                {moved > 0 ? "▲" : moved < 0 ? "▼" : "="} {Math.abs(moved)}
+              </span>
+            </span>
             <span>{result.total_turns} turn{result.total_turns !== 1 ? "s" : ""}</span>
             {typeof result.previous_score === "number" && (
               <span className="font-mono text-xs">

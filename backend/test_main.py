@@ -141,6 +141,29 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(content.guess_conversation_type("tell my parents I'm quitting"), "difficult_news")
         self.assertEqual(content.guess_conversation_type("missed deadlines"), "feedback")
 
+    def test_outcome_is_judged_on_movement(self):
+        self.assertEqual(main.outcome_for(32, 30, "quit"), "flat")       # +2 is not "lost ground"
+        self.assertEqual(main.outcome_for(45, 30, "quit"), "moved")
+        self.assertEqual(main.outcome_for(55, 30, "quit"), "progress")
+        self.assertEqual(main.outcome_for(20, 30, "quit"), "lost")
+        self.assertEqual(main.outcome_for(5, 30, "quit"), "worse")
+        self.assertEqual(main.outcome_for(72, 50, "quit"), "close")
+        self.assertEqual(main.outcome_for(90, 30, "patched_up"), "won")
+        self.assertEqual(main.outcome_for(0, 30, "blocked"), "walked")
+        self.assertEqual(main.verdict_for("flat", "classic"), "😐 Still naraaz. Nothing changed.")
+        self.assertEqual(main.verdict_for("flat", "preset"), "Stalemate. Nothing lost, nothing won.")
+
+    def test_coach_prompt_marks_conditional_dimensions(self):
+        brief = content.preset_brief("raise")
+        self_scoring = prompts.build_coach_messages(brief, [], "x")[0]["content"]
+        self.assertIn("objection_handling", self_scoring)
+        self.assertIn("otherwise null", self_scoring)
+        self.assertIn("<0-10 or null>", self_scoring)
+        with_jev = prompts.build_coach_messages(brief, [], "x", scores={"clarity_of_ask": 10.0, "anchoring": 6.2})[0]["content"]
+        self.assertIn("Not applicable yet: objection_handling", with_jev)
+        self.assertIn("Weakest: anchoring", with_jev)
+        self.assertIn("none applicable yet", prompts.build_coach_messages(brief, [], "x", scores={})[0]["content"])
+
     def test_every_difficulty_has_state_and_every_emotion_has_voice(self):
         for config in content.DIFFICULTY_CONFIG.values():
             self.assertEqual(set(config["state"]), {"trust", "defensiveness"})
@@ -253,10 +276,17 @@ class JevMappingTests(unittest.TestCase):
     def test_turn_questions_cover_movement_and_every_rubric_dimension(self):
         brief = content.preset_brief("raise")
         questions = typesafe.turn_questions(brief)
-        self.assertEqual(set(questions), {"movement", "trust", "defensiveness", "clarity_of_ask", "anchoring", "objection_handling"})
-        for spec in questions.values():
-            self.assertEqual(spec["type"], "score")
-            self.assertTrue(2 <= len(spec["criteria"]) <= 10)
+        self.assertEqual(set(questions), {"movement", "trust", "defensiveness", "clarity_of_ask", "anchoring",
+                                          "objection_handling", "applies_objection_handling"})
+        self.assertEqual(questions["applies_objection_handling"]["type"], "noul")
+        self.assertIn("Rohan has raised an objection", questions["applies_objection_handling"]["instructions"])
+        for key, spec in questions.items():
+            if spec["type"] == "score":
+                self.assertTrue(2 <= len(spec["criteria"]) <= 10)
+        # Only dimensions with a precondition get a Noul.
+        self.assertNotIn("applies_clarity_of_ask", questions)
+        self.assertIn("applies_steadiness", typesafe.turn_questions(content.preset_brief("parents")))
+        self.assertFalse(any(k.startswith("applies_") for k in typesafe.turn_questions(content.classic_brief("priya", "late"))))
         self.assertEqual(questions["movement"]["criteria"], content.MOVEMENT_LEVELS)
         self.assertIn("Rohan", questions["movement"]["instructions"])
         state = typesafe.turn_state(brief, [{"role": "counterpart", "text": "Hi"}], "I want 20%", 30,
@@ -275,18 +305,26 @@ class JevMappingTests(unittest.TestCase):
 
 
 class JevJudgeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_judge_turn_maps_answers(self):
+    async def test_judge_turn_maps_answers_and_skips_inapplicable_dimensions(self):
         brief = content.preset_brief("raise")
         answers = fake_answers(movement=6, trust=4, defensiveness=0,
                                dims={"clarity_of_ask": 3, "anchoring": 1.5, "objection_handling": 0})
+        answers["applies_objection_handling"] = {"type": "noul", "noul": 0.1}  # no objection yet
         with patch.object(typesafe, "system_one", AsyncMock(return_value=answers)) as system_one:
             verdict = await typesafe.judge_turn(brief, [], "I want 20%", 30, {"trust": 40, "defensiveness": 65})
         self.assertEqual(verdict["receptiveness_delta"], 25)
         self.assertEqual(verdict["trust_delta"], 15)
         self.assertEqual(verdict["defensiveness_delta"], -15)
-        self.assertEqual(verdict["scores"], {"clarity_of_ask": 10.0, "anchoring": 5.0, "objection_handling": 0.0})
+        self.assertEqual(verdict["scores"], {"clarity_of_ask": 10.0, "anchoring": 5.0})
+        self.assertEqual(verdict["skipped"], ["objection_handling"])
         self.assertEqual(verdict["confidence"]["movement"], 0.8)
         self.assertEqual(system_one.call_args.args[0]["latest_user_message"], "I want 20%")
+
+        answers["applies_objection_handling"]["noul"] = 0.9  # Rohan has objected; now it counts
+        with patch.object(typesafe, "system_one", AsyncMock(return_value=answers)):
+            verdict = await typesafe.judge_turn(brief, [], "I hear you", 30, {"trust": 40, "defensiveness": 65})
+        self.assertEqual(verdict["scores"]["objection_handling"], 0.0)
+        self.assertEqual(verdict["skipped"], [])
 
     async def test_judge_turn_rejects_missing_scores(self):
         with patch.object(typesafe, "system_one", AsyncMock(return_value={"movement": {"type": "score"}})):
@@ -651,9 +689,11 @@ class RehearsalLoopTests(SessionTestCase):
             ended = await main.end_session_endpoint(second.session_id)
         self.assertEqual(ended.previous_score, 55)
         self.assertEqual(ended.final_score, 30)
+        self.assertEqual(ended.start_score, 30)
         self.assertEqual(ended.reveal["curveballs"], content.PRESETS["raise"]["curveballs"])
         self.assertEqual(ended.status, "quit")
-        self.assertEqual(ended.verdict, "You lost ground.")
+        self.assertEqual(ended.outcome, "flat")  # nothing said, nothing moved
+        self.assertEqual(ended.verdict, "Stalemate. Nothing lost, nothing won.")
         self.assertEqual(stats.call_args.args[1], 0)
 
     async def test_debrief_ignores_opening_and_counts_legacy_roles(self):
@@ -671,7 +711,9 @@ class RehearsalLoopTests(SessionTestCase):
         self.assertEqual(result.total_turns, 1)
         self.assertEqual(result.kind, "classic")
         self.assertEqual(result.meter_label, "Forgiveness")
-        self.assertEqual(result.verdict, "😊 Almost there! She's softening up.")  # score 80, classic copy
+        self.assertEqual(result.outcome, "close")  # score 80 ≥ 70
+        self.assertEqual(result.start_score, 30)   # legacy row: no snapshot → medium's starting score
+        self.assertEqual(result.verdict, "😊 Almost there! She's softening up.")
         self.assertEqual(stats.call_args.args[0]["status"], "quit")
         self.assertEqual(stats.call_args.args[1], 1)
 
