@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { sendVoiceResponse, sendTextResponse, playBase64Audio, rewindSession, isSessionError } from "@/lib/api";
+import { sendVoiceResponse, sendTextResponse, playBase64Audio, rewindSession, isSessionError, averageSkill } from "@/lib/api";
 import type { SessionStartResponse, RespondResponse, CoachNote, CounterpartState, SessionStatus, Turn } from "@/lib/api";
 import { useAudioRecorder } from "@/hooks/useAudioRecorder";
 import PatchMeter from "@/components/PatchMeter";
@@ -151,19 +151,21 @@ export default function ChatContent() {
   const classic = session.kind === "classic";
   const ended = status !== "ongoing";
   const won = status === "patched_up";
+  const name = session.counterpart_name;
+  const skillAvg = averageSkill(skill);
 
   return (
     <main className="min-h-screen flex flex-col max-w-lg mx-auto">
       {/* Header */}
-      <div className="sticky top-0 z-20 bg-patch-bg/90 backdrop-blur-xl border-b border-patch-border px-4 py-3">
-        <div className="flex items-center justify-between mb-2">
+      <div className="sticky top-0 z-20 bg-patch-bg/90 backdrop-blur-xl border-b border-patch-border px-4 py-3 space-y-2">
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-8 h-8 shrink-0 rounded-full bg-patch-accent/20 border border-patch-accent/30 flex items-center justify-center text-sm">
               {session.counterpart_emoji}
             </div>
             <div className="min-w-0">
               <div className="text-sm font-display font-semibold text-patch-soft truncate">
-                {session.counterpart_name}
+                {name}
                 <span className="font-body font-normal text-patch-soft/40"> · {session.counterpart_role}</span>
               </div>
               <div className="text-[10px] text-patch-soft/40 truncate">{session.scenario_title} · {session.difficulty_name}</div>
@@ -174,12 +176,29 @@ export default function ChatContent() {
           </button>
         </div>
         {session.goal && !classic && (
-          <p className="text-[11px] text-patch-soft/50 mb-2 truncate" title={session.goal}>
+          <p className="text-[11px] text-patch-soft/50 truncate" title={session.goal}>
             <span className="text-patch-glow/60">Your goal:</span> {session.goal}
           </p>
         )}
-        <PatchMeter score={score} scoreDelta={lastDelta} emotion={emotion} label={session.meter_label} kind={session.kind} />
-        <div className="mt-2.5 max-w-md mx-auto">
+
+        {/* Them: where the counterpart stands */}
+        <div className="rounded-xl border border-patch-border bg-patch-card/40 px-3 pt-2 pb-2.5">
+          <div className="text-[10px] uppercase tracking-wider text-patch-soft/40 mb-1">
+            {session.counterpart_emoji} {name} · how {classic ? "she's" : "they're"} taking it
+          </div>
+          <PatchMeter score={score} scoreDelta={lastDelta} emotion={emotion}
+            label={`${name}'s ${session.meter_label.toLowerCase()}`} kind={session.kind} />
+        </div>
+
+        {/* You: how you're communicating */}
+        <div className="rounded-xl border border-patch-accent/40 bg-patch-accent/5 px-3 pt-2 pb-2.5">
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-patch-glow">🙂 You · how you&apos;re communicating</span>
+            <span className="text-[10px] text-patch-soft/40 shrink-0">
+              {turn === 0 ? "scored after your first message"
+                : <>coach avg <span className="font-mono text-patch-soft/70">{skillAvg?.toFixed(1) ?? "–"}</span> · {turn} turn{turn !== 1 ? "s" : ""}</>}
+            </span>
+          </div>
           <SkillMeter dimensions={session.dimensions} scores={skill} compact />
         </div>
       </div>

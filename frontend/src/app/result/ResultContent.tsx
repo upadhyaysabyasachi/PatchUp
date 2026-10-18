@@ -116,7 +116,7 @@ export default function ResultContent() {
       </div>
 
       <div className={`glass-card rounded-2xl p-6 mb-4 text-center ${v.border} animate-slide-up`} style={{ animationDelay: "0.1s" }}>
-        <div className="text-xs text-patch-soft/40 uppercase tracking-wider mb-2">{result?.meter_label ?? "Final score"}</div>
+        <div className="text-xs text-patch-soft/40 uppercase tracking-wider mb-2">{result ? `${result.counterpart_name}'s ${result.meter_label.toLowerCase()}` : "Final score"}</div>
         <div className={`font-display text-6xl font-bold ${v.color}`}>{score}%</div>
         {result && (
           <div className="text-sm text-patch-soft/50 mt-2 flex items-center justify-center gap-3">
@@ -133,8 +133,9 @@ export default function ResultContent() {
       </div>
 
       {result && result.dimensions.length > 0 && (
-        <div className="glass-card rounded-2xl p-5 mb-4 animate-slide-up" style={{ animationDelay: "0.15s" }}>
-          <h3 className="font-display text-sm text-patch-soft/50 uppercase tracking-wider mb-3">🧭 How you communicated</h3>
+        <div className="glass-card rounded-2xl p-5 mb-4 animate-slide-up border-patch-accent/30" style={{ animationDelay: "0.15s" }}>
+          <h3 className="font-display text-sm text-patch-glow uppercase tracking-wider mb-1">🙂 You · how you communicated</h3>
+          <p className="text-[11px] text-patch-soft/40 mb-3">The coach scored each of your messages 0–10 on these; this is your average.</p>
           {Object.keys(result.skill_scores).length ? (
             <SkillMeter dimensions={result.dimensions} scores={result.skill_scores} />
           ) : (
