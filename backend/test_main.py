@@ -694,29 +694,83 @@ class ElevenLabsHelperTests(unittest.TestCase):
         self.assertEqual(v2["stability"], 0.28)
         self.assertEqual(v2["style"], 0.5)
 
-    def test_voice_pool_prefers_indian_accents_and_picks_deterministically(self):
+    def test_voice_pool_filters_by_accent_when_available(self):
         voices = [
             {"voice_id": "f1", "labels": {"gender": "female", "accent": "american"}},
             {"voice_id": "m1", "labels": {"gender": "male", "accent": "british"}},
             {"voice_id": "f2", "labels": {"gender": "Female", "accent": "Indian"}},
             {"voice_id": "x", "labels": {}},
         ]
-        self.assertEqual(elevenlabs.voice_pool(voices, "female"), ["f2", "f1"])
-        self.assertEqual(elevenlabs.voice_pool(voices, "male"), ["m1"])
+        self.assertEqual(elevenlabs.voice_pool(voices, "female", "indian"), ["f2"])
+        self.assertEqual(elevenlabs.voice_pool(voices, "female", "scottish"), ["f1", "f2"])  # none match → whole gender
+        self.assertEqual(elevenlabs.voice_pool(voices, "female", "any"), ["f1", "f2"])
+        self.assertEqual(elevenlabs.voice_pool(voices, "male", "indian"), ["m1"])
         self.assertEqual(elevenlabs.choose_voice("Rohan", ["a", "b", "c"]), elevenlabs.choose_voice("rohan", ["a", "b", "c"]))
+
+    def test_library_candidate_prefers_free_tier_and_skips_famous(self):
+        entries = [
+            {"voice_id": "fam", "public_owner_id": "o", "category": "famous", "free_users_allowed": True},
+            {"voice_id": "paid", "public_owner_id": "o", "category": "professional", "free_users_allowed": False},
+            {"voice_id": "free", "public_owner_id": "o", "category": "professional", "free_users_allowed": True},
+        ]
+        self.assertEqual(elevenlabs.pick_library_candidate(entries)["voice_id"], "free")
+        self.assertEqual(elevenlabs.pick_library_candidate(entries[:2])["voice_id"], "paid")
+        self.assertIsNone(elevenlabs.pick_library_candidate([entries[0]]))
+
+    def test_parsing_carries_accent_and_validates_it(self):
+        intake = {"counterpart": {"name": "Liam", "role": "Boss", "gender": "male", "accent": "irish"}, "user_goal": "x"}
+        brief = parsing.parse_brief('{"opening_line":"Hi","counterpart":{"accent":"martian"}}', intake, set(content.RUBRICS), "feedback")
+        self.assertEqual(brief["counterpart"]["accent"], "irish")
+        brief = parsing.parse_brief('{"opening_line":"Hi","counterpart":{"accent":"british"}}', {"counterpart": {"accent": "martian"}}, set(content.RUBRICS), "feedback")
+        self.assertEqual(brief["counterpart"]["accent"], "british")
+        self.assertEqual(parsing.parse_brief('{"opening_line":"Hi"}', {}, set(content.RUBRICS), "feedback")["counterpart"]["accent"], "indian")
+        for preset_id in content.PRESETS:
+            self.assertEqual(content.preset_brief(preset_id)["counterpart"]["accent"], "indian")
+        self.assertEqual(content.classic_brief("priya", "late")["counterpart"]["accent"], "indian")
 
 
 class ElevenLabsVoiceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        elevenlabs._library_cache.clear()
+        elevenlabs._voice_cache = None
+
     async def test_pick_voice_uses_account_voices_then_env_then_defaults(self):
-        voices = [{"voice_id": "acct-f", "labels": {"gender": "female"}}]
-        with patch.object(elevenlabs, "get_voices", AsyncMock(return_value=voices)):
-            self.assertEqual(await elevenlabs.pick_elevenlabs_voice("Ananya", "female"), "acct-f")
-            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Rohan", "male"), elevenlabs.DEFAULT_VOICE_IDS["male"])
+        voices = [{"voice_id": "acct-f", "labels": {"gender": "female", "accent": "indian"}}]
+        with patch.object(elevenlabs, "get_voices", AsyncMock(return_value=voices)), \
+             patch.object(elevenlabs, "library_voice", AsyncMock(return_value=None)):
+            self.assertEqual(await elevenlabs.pick_elevenlabs_voice("Ananya", "female", "indian"), "acct-f")
+            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Rohan", "male", "indian"), elevenlabs.DEFAULT_VOICE_IDS["male"])
         with patch.dict(os.environ, {"ELEVENLABS_VOICE_IDS_MALE": "env-a, env-b"}), \
              patch.object(elevenlabs, "get_voices", AsyncMock(side_effect=RuntimeError("no"))):
-            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Rohan", "male"), ["env-a", "env-b"])
-        with patch.object(elevenlabs, "get_voices", AsyncMock(side_effect=RuntimeError("no"))):
-            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Ananya", "female"), elevenlabs.DEFAULT_VOICE_IDS["female"])
+            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Rohan", "male", "indian"), ["env-a", "env-b"])
+        with patch.object(elevenlabs, "get_voices", AsyncMock(side_effect=RuntimeError("no"))), \
+             patch.object(elevenlabs, "library_voice", AsyncMock(side_effect=RuntimeError("no"))):
+            self.assertIn(await elevenlabs.pick_elevenlabs_voice("Ananya", "female", "indian"), elevenlabs.DEFAULT_VOICE_IDS["female"])
+
+    async def test_missing_accent_is_fetched_from_the_library_once(self):
+        account = [{"voice_id": "f-us", "labels": {"gender": "female", "accent": "american"}}]
+        entries = [{"voice_id": "lib1", "public_owner_id": "own", "name": "Riya", "category": "professional", "free_users_allowed": True}]
+        with patch.object(elevenlabs, "get_voices", AsyncMock(return_value=account)), \
+             patch.object(elevenlabs, "search_library", AsyncMock(return_value=entries)) as search, \
+             patch.object(elevenlabs, "add_library_voice", AsyncMock(return_value="added-id")) as add:
+            self.assertEqual(await elevenlabs.pick_elevenlabs_voice("Ananya", "female", "indian"), "added-id")
+            self.assertEqual(await elevenlabs.pick_elevenlabs_voice("Sneha", "female", "indian"), "added-id")
+        search.assert_awaited_once_with("female", "indian")
+        add.assert_awaited_once()
+        self.assertIn("indian", add.call_args.kwargs["new_name"])
+
+    async def test_library_failure_falls_back_to_gender_pool(self):
+        account = [{"voice_id": "f-us", "labels": {"gender": "female", "accent": "american"}}]
+        with patch.object(elevenlabs, "get_voices", AsyncMock(return_value=account)), \
+             patch.object(elevenlabs, "search_library", AsyncMock(return_value=[])):
+            self.assertEqual(await elevenlabs.pick_elevenlabs_voice("Ananya", "female", "scottish"), "f-us")
+        with patch.object(elevenlabs, "get_voices", AsyncMock(return_value=account)), \
+             patch.object(elevenlabs, "search_library", AsyncMock(side_effect=RuntimeError("quota"))):
+            self.assertEqual(await elevenlabs.pick_elevenlabs_voice("Ananya", "female", "scottish"), "f-us")
+        with patch.object(elevenlabs, "get_voices", AsyncMock(return_value=account)), \
+             patch.object(elevenlabs, "search_library", AsyncMock()) as search:
+            self.assertEqual(await elevenlabs.pick_elevenlabs_voice("Ananya", "female", "any"), "f-us")
+        search.assert_not_called()
 
 
 class SpeechProviderTests(SessionTestCase):
@@ -736,7 +790,7 @@ class SpeechProviderTests(SessionTestCase):
             p.stop()
         super().tearDown()
 
-    counterpart = {"name": "Rohan", "gender": "male", "voice_id": "rohan"}
+    counterpart = {"name": "Rohan", "gender": "male", "accent": "british", "voice_id": "rohan"}
 
     async def test_sarvam_only_when_not_configured(self):
         with patch.object(main, "TTS_PROVIDER", "sarvam"):
@@ -748,7 +802,7 @@ class SpeechProviderTests(SessionTestCase):
             result = await main.speak("Hi", self.counterpart, "te-IN", "angry", 1.1, 0.7)
         self.assertEqual(result, ("bXAz", "audio/mpeg", "elevenlabs"))
         main.sarvam_tts.assert_not_called()
-        main.pick_elevenlabs_voice.assert_awaited_with("Rohan", "male")
+        main.pick_elevenlabs_voice.assert_awaited_with("Rohan", "male", "british")
         self.assertEqual(main.elevenlabs_tts.call_args.kwargs["emotion"], "angry")
 
     async def test_elevenlabs_failure_falls_back_to_sarvam(self):

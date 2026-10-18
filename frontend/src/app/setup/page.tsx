@@ -214,7 +214,7 @@ export default function SetupPage() {
             <button onClick={() => setCustomize(!customize)} className="text-xs text-patch-glow/60 hover:text-patch-glow transition-colors">
               {customize ? "▴ Hide" : "▾ Customize this"} <span className="text-patch-soft/30">— names, goal, what actually happened</span>
             </button>
-            {customize && <div className="pt-2"><IntakeForm value={intake} onChange={setIntake} /></div>}
+            {customize && <div className="pt-2"><IntakeForm value={intake} onChange={setIntake} accents={catalog.accents} /></div>}
           </div>
           <button onClick={() => setStep(2)} className="w-full py-3.5 bg-patch-accent rounded-2xl font-semibold text-white hover:bg-patch-accent/90 transition-all hover:scale-[1.01] active:scale-[0.99]">
             Continue →
@@ -226,7 +226,7 @@ export default function SetupPage() {
       {!safety && mode === "custom" && step === 1 && (
         <div className="space-y-4 animate-slide-up">
           <div className="glass-card rounded-2xl p-5">
-            <IntakeForm value={intake} onChange={setIntake} />
+            <IntakeForm value={intake} onChange={setIntake} accents={catalog.accents} />
           </div>
           <button onClick={() => setStep(2)} disabled={!intake.user_goal.trim() || !intake.counterpart.role.trim()}
             className="w-full py-3.5 bg-patch-accent rounded-2xl font-semibold text-white hover:bg-patch-accent/90 transition-all disabled:opacity-40 hover:scale-[1.01] active:scale-[0.99]">
@@ -306,6 +306,7 @@ export default function SetupPage() {
             ) : (
               <>
                 <div className="flex justify-between gap-4"><span className="text-patch-soft/60 shrink-0">Talking to</span><span className="text-patch-soft text-right">{intake.counterpart.name || "—"} · {intake.counterpart.role}</span></div>
+                <div className="flex justify-between"><span className="text-patch-soft/60">Voice</span><span className="text-patch-soft capitalize">{intake.counterpart.gender} · {catalog.accents?.find(a => a.id === intake.counterpart.accent)?.label ?? intake.counterpart.accent}</span></div>
                 <div className="flex justify-between gap-4"><span className="text-patch-soft/60 shrink-0">You need</span><span className="text-patch-soft text-right line-clamp-2">{intake.user_goal}</span></div>
                 <div className="flex justify-between"><span className="text-patch-soft/60">Temperament</span><span className="text-patch-soft">{LEVEL_EMOJI[level]} {levelName}</span></div>
               </>

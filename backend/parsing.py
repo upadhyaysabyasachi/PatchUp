@@ -8,7 +8,7 @@ import json
 import re
 from typing import Optional
 
-from content import VOICES, pick_voice
+from content import ACCENT_IDS, DEFAULT_ACCENT, VOICES, pick_voice
 
 
 def _fix_json_quirks(text: str) -> str:
@@ -141,12 +141,18 @@ def _counterpart_from(data: dict, fallback: dict) -> dict:
     if gender not in ("male", "female"):
         gender = "female"
     name = clean_str(data.get("name"), 60) or clean_str(fallback.get("name"), 60) or "Them"
+    # The user's accent choice wins over anything the LLM wrote; both must be a known id.
+    accent = next(
+        (value for value in (fallback.get("accent"), data.get("accent")) if value in ACCENT_IDS),
+        DEFAULT_ACCENT,
+    )
     voice = data.get("voice_id")
     all_voices = VOICES["male"] + VOICES["female"]
     return {
         "name": name,
         "role": clean_str(data.get("role"), 120) or clean_str(fallback.get("role"), 120) or "The other person",
         "gender": gender,
+        "accent": accent,
         "relationship": clean_str(data.get("relationship"), 400) or clean_str(fallback.get("relationship"), 400) or "",
         "style": clean_str(data.get("style"), 800) or clean_str(fallback.get("style"), 800) or "",
         "voice_id": voice if isinstance(voice, str) and voice in all_voices else pick_voice(name, gender),

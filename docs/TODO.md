@@ -69,8 +69,10 @@ feedback, telling parents about a career change, ending a relationship, letting 
       as an audio tag, Scribe v2 STT, voices picked from the account by gender. Sarvam Bulbul/Saarika remain
       as per-call fallback and as the provider when `ELEVENLABS_API_KEY` is unset.
 - [ ] Measure v3 latency per turn in production; if it hurts, switch `ELEVENLABS_TTS_MODEL=eleven_v3_conversational`
-- [ ] Add a few Indian-accent voices to the ElevenLabs account (Voice Library) so `pick_elevenlabs_voice` has
-      accent-matched options; until then it uses the default premade voices
+- [x] Accent is part of the intake (`counterpart.accent`, default Indian). `pick_elevenlabs_voice` uses an
+      account voice with that accent, or searches the Voice Library and adds one to the account on first use
+      (free-tier-allowed, most-used first). Library additions use the account's custom-voice slots; if the plan
+      is out of slots the add fails and a same-gender voice is used instead.
 
 ## Milestone 4 — Realism
 

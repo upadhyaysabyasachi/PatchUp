@@ -4,6 +4,7 @@ Primary voice provider when ELEVENLABS_API_KEY is set; main.py falls back to Sar
 on any failure here. Nothing in this module catches errors on purpose: the caller
 decides what to do when ElevenLabs is unavailable.
 """
+import asyncio
 import logging
 import os
 from typing import Optional
@@ -11,7 +12,7 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 
-from content import VOICES
+from content import DEFAULT_ACCENT, VOICES
 
 load_dotenv()
 
@@ -55,6 +56,8 @@ DEFAULT_VOICE_IDS = {
 }
 
 _voice_cache: Optional[list] = None
+_library_cache: dict[tuple[str, str], str] = {}  # (gender, accent) → voice id added from the Voice Library
+_library_lock = asyncio.Lock()
 
 
 def elevenlabs_enabled() -> bool:
@@ -97,16 +100,19 @@ async def get_voices() -> list:
     return _voice_cache
 
 
-def voice_pool(voices: list, gender: str) -> list[str]:
-    """Voice ids matching the gender; Indian-accent voices first, then the rest."""
+def _label(voice: dict, key: str) -> str:
+    return str((voice.get("labels") or {}).get(key, "")).lower()
+
+
+def voice_pool(voices: list, gender: str, accent: str = "any") -> list[str]:
+    """Account voice ids for the gender. If any carry the wanted accent, only those are returned."""
     wanted = "male" if gender == "male" else "female"
-    matching = [
-        voice for voice in voices
-        if str((voice.get("labels") or {}).get("gender", "")).lower() == wanted and voice.get("voice_id")
-    ]
-    indian = [v["voice_id"] for v in matching if "indian" in str((v.get("labels") or {}).get("accent", "")).lower()]
-    others = [v["voice_id"] for v in matching if v["voice_id"] not in indian]
-    return indian + others
+    matching = [voice for voice in voices if _label(voice, "gender") == wanted and voice.get("voice_id")]
+    if accent and accent != "any":
+        with_accent = [v["voice_id"] for v in matching if accent in _label(v, "accent")]
+        if with_accent:
+            return with_accent
+    return [v["voice_id"] for v in matching]
 
 
 def choose_voice(name: str, pool: list[str]) -> str:
@@ -115,17 +121,87 @@ def choose_voice(name: str, pool: list[str]) -> str:
     return pool[seed % len(pool)]
 
 
-async def pick_elevenlabs_voice(name: str, gender: str) -> str:
+async def search_library(gender: str, accent: str, page_size: int = 10) -> list:
+    """Voice Library entries for the gender + accent, most-used first."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{ELEVENLABS_BASE_URL}/v1/shared-voices",
+            headers=_headers(json_body=False),
+            params={"gender": gender, "accent": accent, "page_size": page_size, "sort": "usage_character_count_1y"},
+        )
+        resp.raise_for_status()
+        return resp.json().get("voices", [])
+
+
+async def add_library_voice(public_owner_id: str, voice_id: str, new_name: str) -> str:
+    """Add a shared voice to the account; returns the id it gets in this account."""
+    global _voice_cache
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{ELEVENLABS_BASE_URL}/v1/voices/add/{public_owner_id}/{voice_id}",
+            headers=_headers(),
+            json={"new_name": new_name},
+        )
+        resp.raise_for_status()
+    _voice_cache = None  # the account's voice list changed
+    return resp.json()["voice_id"]
+
+
+def pick_library_candidate(entries: list) -> Optional[dict]:
+    """Prefer voices free plans may use; skip 'famous' (celebrity) voices."""
+    usable = [e for e in entries if e.get("category") != "famous" and e.get("voice_id") and e.get("public_owner_id")]
+    free = [e for e in usable if e.get("free_users_allowed")]
+    return (free or usable or [None])[0]
+
+
+async def library_voice(gender: str, accent: str) -> Optional[str]:
+    """A voice with this accent from the Voice Library, added to the account on first use."""
+    key = (gender, accent)
+    if key in _library_cache:
+        return _library_cache[key]
+    async with _library_lock:
+        if key in _library_cache:
+            return _library_cache[key]
+        candidate = pick_library_candidate(await search_library(gender, accent))
+        if candidate is None:
+            return None
+        voice_id = await add_library_voice(
+            candidate["public_owner_id"], candidate["voice_id"],
+            new_name=f"PatchUp {accent} {gender} ({candidate.get('name', 'voice')})",
+        )
+        _library_cache[key] = voice_id
+        log.info("Added Voice Library voice %r for %s/%s", candidate.get("name"), gender, accent)
+        return voice_id
+
+
+async def pick_elevenlabs_voice(name: str, gender: str, accent: str = DEFAULT_ACCENT) -> str:
+    """Env override → account voice with the accent → Voice Library (added to the account) →
+    any account voice of the gender → premade defaults."""
     gender = "male" if gender == "male" else "female"
+    accent = (accent or DEFAULT_ACCENT).lower()
     pool = _env_voice_ids(gender)
-    if not pool:
+    if pool:
+        return choose_voice(name, pool)
+
+    gender_pool: list[str] = []
+    try:
+        voices = await get_voices()
+        pool = voice_pool(voices, gender, accent)
+        gender_pool = voice_pool(voices, gender, "any")
+        if pool and pool != gender_pool:
+            return choose_voice(name, pool)  # the account already has voices with this accent
+    except Exception as e:
+        log.warning("Could not list ElevenLabs voices: %s", e)
+
+    if accent != "any":
         try:
-            pool = voice_pool(await get_voices(), gender)
+            voice_id = await library_voice(gender, accent)
+            if voice_id:
+                return voice_id
         except Exception as e:
-            log.warning("Could not list ElevenLabs voices; using built-in defaults: %s", e)
-    if not pool:
-        pool = DEFAULT_VOICE_IDS[gender]
-    return choose_voice(name, pool)
+            log.warning("Voice Library lookup for %s/%s failed; using a %s voice without that accent: %s", gender, accent, gender, e)
+
+    return choose_voice(name, gender_pool or DEFAULT_VOICE_IDS[gender])
 
 
 # ─── Text-to-speech ──────────────────────────────────────────────────────────

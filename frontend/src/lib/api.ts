@@ -9,15 +9,16 @@ export type BriefKind = "preset" | "custom" | "classic";
 
 export interface Dimension { id: string; label: string; description: string; }
 export interface IntakeCounterpart {
-  name: string; role: string; gender: "male" | "female"; relationship: string; style: string;
+  name: string; role: string; gender: "male" | "female"; accent: string; relationship: string; style: string;
 }
 export interface Intake {
   counterpart: IntakeCounterpart; user_goal: string; user_fears: string; history: string;
 }
 export const EMPTY_INTAKE: Intake = {
-  counterpart: { name: "", role: "", gender: "female", relationship: "", style: "" },
+  counterpart: { name: "", role: "", gender: "female", accent: "indian", relationship: "", style: "" },
   user_goal: "", user_fears: "", history: "",
 };
+export interface Accent { id: string; label: string; }
 
 export interface Preset {
   id: string; title: string; emoji: string; description: string;
@@ -31,6 +32,7 @@ export interface Rubric { name: string; meter_label: string; dimensions: Dimensi
 export interface Catalog {
   presets: Preset[]; personas: Persona[]; scenarios: Scenario[];
   temperaments: LevelOption[]; difficulties: LevelOption[]; languages: Language[];
+  accents?: Accent[];
   rubrics: Record<ConversationType, Rubric>;
   judge?: "jev" | "actor";
 }

@@ -21,6 +21,24 @@ def pick_voice(name: str, gender: str) -> str:
     return pool[seed % len(pool)]
 
 
+# How the counterpart sounds. Ids are ElevenLabs accent labels (used verbatim to filter
+# the account's voices and the Voice Library). Sarvam voices are all Indian regardless.
+ACCENTS = [
+    {"id": "indian", "label": "Indian"},
+    {"id": "american", "label": "American"},
+    {"id": "british", "label": "British"},
+    {"id": "australian", "label": "Australian"},
+    {"id": "irish", "label": "Irish"},
+    {"id": "scottish", "label": "Scottish"},
+    {"id": "canadian", "label": "Canadian"},
+    {"id": "south african", "label": "South African"},
+    {"id": "nigerian", "label": "Nigerian"},
+    {"id": "any", "label": "No preference"},
+]
+ACCENT_IDS = {accent["id"] for accent in ACCENTS}
+DEFAULT_ACCENT = "indian"
+
+
 # ─── Conversation types & coach rubrics ──────────────────────────────────────
 # `dimensions` are what the coach scores each user turn on (0-10). Each has a
 # description and four concrete, ordered levels: Jev rates the message against the
@@ -382,6 +400,7 @@ PRESETS = {
             "name": "Rohan",
             "role": "Your engineering manager",
             "gender": "male",
+            "accent": "indian",
             "relationship": "You've reported to him for 18 months. Friendly, but keeps things businesslike.",
             "style": "Polite and measured. Deflects to process ('let me check with HR'), asks clarifying questions to buy time, and rarely commits in the room.",
         },
@@ -409,6 +428,7 @@ PRESETS = {
             "name": "Sneha",
             "role": "Senior engineer who reports to you",
             "gender": "female",
+            "accent": "indian",
             "relationship": "She's been on the team three years, longer than you've been its manager. Respected, prickly.",
             "style": "Sharp and fast. Answers criticism with counter-examples, questions your data, and goes quiet when she feels judged.",
         },
@@ -436,6 +456,7 @@ PRESETS = {
             "name": "Papa",
             "role": "Your father",
             "gender": "male",
+            "accent": "indian",
             "relationship": "Retired bank officer. Proud of your job, tells relatives about it. Loves you in a way that comes out as worry.",
             "style": "Starts calm and practical, asks about money, then gets emotional. Uses silence and 'do what you want' when hurt. Mixes Hindi and English.",
         },
@@ -463,6 +484,7 @@ PRESETS = {
             "name": "Ananya",
             "role": "Your partner of three years",
             "gender": "female",
+            "accent": "indian",
             "relationship": "You live in the same city, see each other most days. Her parents already treat you as family.",
             "style": "Warm and talkative at first, then bargains, then gets angry, then pleads. Remembers everything you ever said about the future.",
         },
@@ -490,6 +512,7 @@ PRESETS = {
             "name": "Manoj",
             "role": "Senior analyst on your team",
             "gender": "male",
+            "accent": "indian",
             "relationship": "He was here before you. He onboarded you. He's mentored half the team.",
             "style": "Quiet and dignified until he isn't. Asks pointed questions, wants names and reasons, and appeals to loyalty.",
         },
@@ -517,6 +540,7 @@ PRESETS = {
             "name": "Karan",
             "role": "Your co-founder and CTO",
             "gender": "male",
+            "accent": "indian",
             "relationship": "Friends since college. Started the company together two years ago. Equal equity.",
             "style": "Charming, fast-talking, turns criticism into a debate about strategy. Gets cold and clipped when he feels accused.",
         },
@@ -711,6 +735,7 @@ def classic_brief(persona_id: str, scenario_id: str) -> dict:
             "name": persona["name"],
             "role": persona["title"],
             "gender": "female",
+            "accent": "indian",
             "voice_id": persona["voice_id"],
             "relationship": "Your girlfriend",
             "style": persona["system_prompt"],
@@ -747,7 +772,7 @@ def preset_brief(preset_id: str) -> dict:
 
 
 INTAKE_FIELDS = ("user_goal", "user_fears", "history")
-COUNTERPART_INTAKE_FIELDS = ("name", "role", "gender", "relationship", "style")
+COUNTERPART_INTAKE_FIELDS = ("name", "role", "gender", "accent", "relationship", "style")
 
 
 def preset_intake(preset_id: str) -> dict:

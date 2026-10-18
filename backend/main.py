@@ -22,7 +22,7 @@ load_dotenv()
 
 import db  # noqa: E402  (reads env at import; load_dotenv must run first)
 from content import (  # noqa: E402
-    CLASSIC_DIFFICULTY_IDS, DEFAULT_EMOTION, DIFFICULTY_CONFIG, EMOTION_VOICE_PARAMS, LANGUAGES,
+    ACCENTS, CLASSIC_DIFFICULTY_IDS, DEFAULT_ACCENT, DEFAULT_EMOTION, DIFFICULTY_CONFIG, EMOTION_VOICE_PARAMS, LANGUAGES,
     PERSONAS, PRESETS, RUBRICS, SCENARIOS, TEMPERAMENT_IDS, classic_brief, guess_conversation_type,
     pick_voice, preset_brief, preset_intake, safety_payload, screen_intake_text,
 )
@@ -81,6 +81,7 @@ class IntakeCounterpart(BaseModel):
     name: str = ""
     role: str = ""
     gender: str = "female"
+    accent: str = DEFAULT_ACCENT  # how they sound; see content.ACCENTS
     relationship: str = ""
     style: str = ""
 
@@ -313,7 +314,7 @@ def verdict_for(score: int, kind: str) -> str:
 def normalized_intake(intake: dict) -> dict:
     counterpart = intake.get("counterpart") or {}
     return {
-        "counterpart": {key: str(counterpart.get(key, "")).strip() for key in ("name", "role", "gender", "relationship", "style")},
+        "counterpart": {key: str(counterpart.get(key, "")).strip() for key in ("name", "role", "gender", "accent", "relationship", "style")},
         **{key: str(intake.get(key, "")).strip() for key in ("user_goal", "user_fears", "history")},
     }
 
@@ -333,7 +334,9 @@ async def speak(text: str, counterpart: dict, language: str, emotion: str, pace:
     """
     if TTS_PROVIDER == "elevenlabs" and supports_language(ELEVENLABS_TTS_MODEL, language):
         try:
-            voice_id = await pick_elevenlabs_voice(counterpart["name"], counterpart.get("gender", "female"))
+            voice_id = await pick_elevenlabs_voice(
+                counterpart["name"], counterpart.get("gender", "female"), counterpart.get("accent", DEFAULT_ACCENT),
+            )
             audio = await elevenlabs_tts(text, voice_id, language, emotion=emotion, pace=pace, temperature=temperature)
             return base64.b64encode(audio).decode("ascii"), ELEVENLABS_AUDIO_MIME, "elevenlabs"
         except Exception as e:
@@ -620,6 +623,7 @@ async def get_catalog():
             for key in CLASSIC_DIFFICULTY_IDS
         ],
         "languages": LANGUAGES,
+        "accents": ACCENTS,
         "rubrics": {
             key: {"name": rubric["name"], "meter_label": rubric["meter_label"], "dimensions": dimension_list(key)}
             for key, rubric in RUBRICS.items()

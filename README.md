@@ -14,7 +14,7 @@ The original *convince your angry girlfriend* game is still here as **Classic** 
 
 | | Primary | Fallback |
 |---|---|---|
-| **Text-to-Speech** | **ElevenLabs Eleven v3** — the counterpart's emotion becomes a delivery tag (`[angry]`, `[crying]`, `[coldly]`…); 70+ languages; voice picked per counterpart from your account's voices (Indian accents first) | Sarvam **Bulbul V3** — pace/temperature follow emotion and defensiveness |
+| **Text-to-Speech** | **ElevenLabs Eleven v3** — the counterpart's emotion becomes a delivery tag (`[angry]`, `[crying]`, `[coldly]`…); 70+ languages; the voice matches the accent you pick in the intake (from your account's voices, or fetched from the Voice Library and added on first use) | Sarvam **Bulbul V3** — pace/temperature follow emotion and defensiveness |
 | **Speech-to-Text** | **ElevenLabs Scribe v2** | Sarvam **Saarika v2.5** |
 
 Set `ELEVENLABS_API_KEY` to turn ElevenLabs on. Any ElevenLabs failure falls back to Sarvam for that call; `TTS_PROVIDER=sarvam` / `STT_PROVIDER=sarvam` switch back entirely. Each turn reports which provider spoke (`voice_provider`) and the audio format (`audio_mime`).
