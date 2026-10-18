@@ -318,7 +318,7 @@ export default function SetupPage() {
             className="w-full py-4 bg-patch-accent rounded-2xl font-body font-semibold text-white text-lg hover:bg-patch-accent/90 transition-all animate-glow-pulse disabled:opacity-50 disabled:animate-none hover:scale-[1.02] active:scale-[0.98]">
             {busy === "building" ? "Building the other side…" : busy === "starting" ? "Connecting…" : "Start Conversation 🎙️"}
           </button>
-          {busy === "building" && <p className="text-center text-[11px] text-patch-soft/40">Sarvam-M is writing {intake.counterpart.name || "their"} hidden motivations and a couple of curveballs. ~10s.</p>}
+          {busy === "building" && <p className="text-center text-[11px] text-patch-soft/40">Sarvam 105b is writing {intake.counterpart.name || "their"} hidden motivations and a couple of curveballs. ~10s.</p>}
         </div>
       )}
     </main>

@@ -39,7 +39,7 @@ from prompts import (  # noqa: E402
     build_actor_messages, build_actor_prompt, build_brief_messages, build_coach_messages,
     build_debrief_messages,
 )
-from sarvam import sarvam_llm, sarvam_stt, sarvam_translate, sarvam_tts  # noqa: E402
+from sarvam import SARVAM_ACTOR_MODEL, sarvam_llm, sarvam_stt, sarvam_translate, sarvam_tts  # noqa: E402
 from typesafe import judge_enabled, judge_intake, judge_turn, needs_english  # noqa: E402
 
 log = logging.getLogger("patchup")
@@ -439,8 +439,8 @@ async def process_user_message(session_id: str, user_text: str, stt_provider: Op
         coach_messages = build_coach_messages(brief, conversation, user_text)
 
     raw_actor, raw_coach = await asyncio.gather(
-        sarvam_llm(actor_messages, temperature=0.7, max_tokens=300),
-        sarvam_llm(coach_messages, temperature=0.3, max_tokens=400),
+        sarvam_llm(actor_messages, temperature=0.7, max_tokens=400, model=SARVAM_ACTOR_MODEL),
+        sarvam_llm(coach_messages, temperature=0.3, max_tokens=600, reasoning="low"),
         return_exceptions=True,
     )
     if isinstance(raw_actor, BaseException):
@@ -583,6 +583,7 @@ async def start_from_brief(brief: dict, difficulty: str, language: str, previous
 async def health():
     return {
         "status": "ok",
+        "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7] or None,
         "supabase": db.supabase is not None,
         "storage": db.storage_mode(),
         "judge": "jev" if judge_enabled() else "actor",
@@ -656,7 +657,7 @@ async def get_leaderboard():
 @app.post("/api/scenario/build", response_model=ScenarioBuildResponse)
 async def build_scenario(req: ScenarioBuildRequest):
     """Turn an intake into a counterpart brief. Presets with untouched intake skip the LLM.
-    Sarvam-M writes the brief; Jev (when configured) classifies safety and conversation type in parallel."""
+    Sarvam 105b writes the brief; Jev (when configured) classifies safety and conversation type in parallel."""
     if req.preset_id and req.preset_id not in PRESETS:
         raise HTTPException(400, f"Unknown preset: {req.preset_id}")
     intake = normalized_intake(req.intake.model_dump()) if req.intake else None
@@ -675,7 +676,7 @@ async def build_scenario(req: ScenarioBuildRequest):
 
     preset = PRESETS.get(req.preset_id) if req.preset_id else None
     raw, verdict = await asyncio.gather(
-        sarvam_llm(build_brief_messages(intake, preset), temperature=0.8, max_tokens=1024),
+        sarvam_llm(build_brief_messages(intake, preset), temperature=0.8, max_tokens=1500, reasoning="low"),
         judge_intake(intake) if judge_enabled() else _none(),
         return_exceptions=True,
     )
@@ -847,7 +848,7 @@ async def end_session_endpoint(session_id: str):
     try:
         tips_raw = await sarvam_llm(
             build_debrief_messages(brief, [turn["text"] for turn in user_turns], skill_scores, score),
-            temperature=0.5,
+            temperature=0.5, max_tokens=600, reasoning="low",
         )
         tips = parse_tips(tips_raw)
     except Exception as e:

@@ -27,7 +27,7 @@ export default function HomePage() {
           Start rehearsing <span className="ml-2 inline-block group-hover:translate-x-1 transition-transform">→</span>
         </button>
         <div className="mt-12 flex items-center justify-center gap-2 text-xs text-patch-soft/30">
-          <span>Powered by</span><span className="font-semibold text-patch-soft/50">Sarvam AI — Bulbul V3 · Saarika · Sarvam-M · Mayura</span><span>🇮🇳</span>
+          <span>Powered by</span><span className="font-semibold text-patch-soft/50">Sarvam AI — Bulbul V3 · Saarika · Sarvam 105b · Mayura</span><span>🇮🇳</span>
         </div>
         <div className="mt-4 inline-block px-3 py-1 bg-patch-card border border-patch-border rounded-full">
           <span className="text-[10px] text-patch-soft/40 tracking-wider uppercase">#TheMicIsYours · Build with Bulbul Challenge</span>

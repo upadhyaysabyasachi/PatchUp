@@ -1,11 +1,11 @@
 """Prompt builders for the actor, the coach, the scenario builder, and the debrief.
 
-Sarvam-M requires the first non-system message to be from the user, so the
+Sarvam 105b requires the first non-system message to be from the user, so the
 counterpart's opening line is folded into the system prompt rather than sent as
 an assistant turn.
 
 When Jev judges the turn, the actor only acts and the coach only writes; when it
-doesn't, the same builders ask Sarvam-M to self-report movement and self-score.
+doesn't, the same builders ask Sarvam 105b to self-report movement and self-score.
 """
 from typing import Optional
 
@@ -209,6 +209,6 @@ def build_debrief_messages(brief: dict, user_turns: list[str], skill_scores: dic
         f"{cp['name']}'s receptiveness at the end: {score}/100. Skill averages (0-10): {skill_scores or 'none'}. "
         f"{f'Weakest dimension: {weakest}. ' if weakest else ''}"
         "Give 3 short tips (one sentence each) on what the user could do better NEXT time, specific to what they "
-        'actually said. Reply as a JSON array: ["tip1","tip2","tip3"]'
+        'actually said. Reply with ONLY a JSON object: {"tips": ["tip1", "tip2", "tip3"]}'
     )
     return [{"role": "user", "content": content}]

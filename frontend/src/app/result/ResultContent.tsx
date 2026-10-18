@@ -235,7 +235,7 @@ export default function ResultContent() {
           <span className="text-xs text-patch-soft/40">Share your score! 🩹 #TheMicIsYours @SarvamAI</span>
         </div>
       </div>
-      <div className="text-center mt-6 text-[10px] text-patch-soft/20">Powered by Sarvam Bulbul V3 · Saarika · Sarvam-M · Mayura 🇮🇳</div>
+      <div className="text-center mt-6 text-[10px] text-patch-soft/20">Powered by Sarvam Bulbul V3 · Saarika · Sarvam 105b · Mayura 🇮🇳</div>
     </main>
   );
 }

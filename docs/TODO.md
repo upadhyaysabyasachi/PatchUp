@@ -45,7 +45,7 @@ feedback, telling parents about a career change, ending a relationship, letting 
       (receptiveness, trust, defensiveness) which drives voice params
 - [x] Judgement on **TypeSafe Jev** (`backend/typesafe.py`): movement, trust and defensiveness deltas plus
       the rubric scores come from typed Score answers, and intake safety / conversation type from Noul + Choice.
-      The actor no longer judges the user. Falls back to Sarvam-M self-judging without `TYPESAFE_API_KEY`.
+      The actor no longer judges the user. Falls back to Sarvam 105b self-judging without `TYPESAFE_API_KEY`.
 - [x] **Coach** LLM call: scores each user turn against a rubric per conversation type (`RUBRICS`)
   - Emotional repair: acknowledgment, ownership, non-defensiveness
   - Negotiation: clarity of ask, anchoring, objection handling

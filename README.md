@@ -23,14 +23,14 @@ Set `ELEVENLABS_API_KEY` to turn ElevenLabs on. Any ElevenLabs failure falls bac
 
 | API | Model | Purpose |
 |-----|-------|---------|
-| **Chat Completion** | Sarvam-M | Three roles: the **actor** (plays the counterpart), the **coach** (writes the note), the **scenario builder** (intake → brief) |
+| **Chat Completion** | Sarvam 105b | Three roles: the **actor** (plays the counterpart), the **coach** (writes the note), the **scenario builder** (intake → brief) |
 | **Translate** | Mayura v1 | Says the counterpart's opening line in your chosen language (code-mixed Hinglish for Hindi); translates native-script turns for the judge |
 | **Text-to-Speech** | Bulbul V3 | Voice fallback (or primary with `TTS_PROVIDER=sarvam`) |
 | **Speech-to-Text** | Saarika v2.5 | Transcription fallback (or primary with `STT_PROVIDER=sarvam`) |
 
 ### Judgement: TypeSafe Jev
 
-The parts of PatchUp that are *judgement* rather than generation run on [TypeSafe Jev](https://docs.typesafe.ai), a System One model that returns typed, calibrated answers instead of text: how much your message moved the counterpart (and their trust and defensiveness), your 0-10 score on each rubric dimension, and whether a custom scenario involves abuse or self-harm. Set `TYPESAFE_API_KEY` to enable it. Without it, the Sarvam-M actor self-reports movement and the coach self-scores, as a fallback.
+The parts of PatchUp that are *judgement* rather than generation run on [TypeSafe Jev](https://docs.typesafe.ai), a System One model that returns typed, calibrated answers instead of text: how much your message moved the counterpart (and their trust and defensiveness), your 0-10 score on each rubric dimension, and whether a custom scenario involves abuse or self-harm. Set `TYPESAFE_API_KEY` to enable it. Without it, the Sarvam 105b actor self-reports movement and the coach self-scores, as a fallback.
 
 ---
 

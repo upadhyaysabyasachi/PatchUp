@@ -42,7 +42,7 @@ DEFAULT_ACCENT = "indian"
 # ─── Conversation types & coach rubrics ──────────────────────────────────────
 # `dimensions` are what the coach scores each user turn on (0-10). Each has a
 # description and four concrete, ordered levels: Jev rates the message against the
-# levels; the Sarvam-M coach sees the description when it self-scores.
+# levels; the Sarvam 105b coach sees the description when it self-scores.
 # `meter_label` names the counterpart-receptiveness meter in the UI.
 # `actor_hints` tell the actor what genuinely moves someone in this situation.
 RUBRICS = {

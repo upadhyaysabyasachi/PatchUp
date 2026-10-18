@@ -1,7 +1,7 @@
 """TypeSafe Jev (System One): typed judgments for the parts of PatchUp that are judgement, not generation.
 
 Jev returns probabilities over levels/options, not text. We use it to decide how a user's
-message moves the counterpart and how well it scores on the coach rubric; Sarvam-M then
+message moves the counterpart and how well it scores on the coach rubric; Sarvam 105b then
 only has to act and write. Everything here is optional: without TYPESAFE_API_KEY the
 actor self-reports movement and the coach LLM self-scores, as before.
 """

@@ -1,4 +1,4 @@
-"""Sarvam AI API helpers: Saarika (STT), Bulbul (TTS), Sarvam-M (LLM), Mayura (Translate)."""
+"""Sarvam AI API helpers: Saarika (STT), Bulbul (TTS), Sarvam 105b (LLM), Mayura (Translate)."""
 import logging
 import os
 from typing import Optional
@@ -10,6 +10,10 @@ load_dotenv()
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 SARVAM_BASE_URL = "https://api.sarvam.ai"
+# `sarvam-m` was retired. 105b-conversations is tuned for real-time dialogue (the actor);
+# 105b for reasoning tasks (coach, scenario builder, debrief).
+SARVAM_LLM_MODEL = os.getenv("SARVAM_LLM_MODEL", "sarvam-105b")
+SARVAM_ACTOR_MODEL = os.getenv("SARVAM_ACTOR_MODEL", "sarvam-105b-conversations")
 
 log = logging.getLogger("patchup")
 
@@ -87,19 +91,31 @@ async def sarvam_tts(
         return audios[0] if audios else ""
 
 
-async def sarvam_llm(messages: list, temperature: float = 0.7, max_tokens: int = 512) -> str:
-    """Chat completion using Sarvam-M."""
+async def sarvam_llm(
+    messages: list,
+    temperature: float = 0.7,
+    max_tokens: int = 512,
+    model: Optional[str] = None,
+    reasoning: Optional[str] = None,
+    json_mode: bool = True,
+) -> str:
+    """Chat completion on Sarvam's 105b models.
+
+    `reasoning` is the API's reasoning_effort: None disables it (the default would otherwise be
+    'medium', and reasoning tokens count against max_tokens). `json_mode` asks for a JSON object;
+    every caller here parses JSON, so it's on by default.
+    """
+    payload = {
+        "model": model or SARVAM_LLM_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "reasoning_effort": reasoning,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            f"{SARVAM_BASE_URL}/v1/chat/completions",
-            headers=_headers(),
-            json={
-                "model": "sarvam-m",
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-        )
+        resp = await client.post(f"{SARVAM_BASE_URL}/v1/chat/completions", headers=_headers(), json=payload)
         if resp.status_code != 200:
             log.warning("Sarvam LLM error %s: %s", resp.status_code, resp.text)
             resp.raise_for_status()

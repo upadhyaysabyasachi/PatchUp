@@ -122,7 +122,10 @@ def parse_coach(raw: str, dimensions) -> Optional[dict]:
 # ─── Debrief tips ────────────────────────────────────────────────────────────
 
 def parse_tips(raw: str) -> list[str]:
+    """Accepts a bare array or an object wrapping one (JSON mode returns objects)."""
     tips = parse_json_payload(raw)
+    if isinstance(tips, dict):
+        tips = next((value for value in tips.values() if isinstance(value, list)), None)
     if not isinstance(tips, list) or len(tips) < 3 or not all(
         isinstance(tip, str) and tip.strip() for tip in tips
     ):

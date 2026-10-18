@@ -25,7 +25,7 @@ TIPS = ["One", "Two", "Three"]
 
 def fake_llm(actor=ACTOR, coach=COACH, brief=None, tips=TIPS, coach_error=None):
     """Route mocked Sarvam-M calls by the prompt they carry."""
-    async def side_effect(messages, temperature=0.7, max_tokens=512):
+    async def side_effect(messages, temperature=0.7, max_tokens=512, **kwargs):
         system = messages[0]["content"] if messages[0]["role"] == "system" else ""
         if "communication coach" in system:
             if coach_error:
@@ -74,7 +74,7 @@ class ParsingTests(unittest.TestCase):
 
     def test_tips_wrappers_and_invalid(self):
         payload = '["Listen", "Be specific", "Agree next steps"]'
-        for raw in (payload, f"```json\n{payload}\n```", f"Tips: {payload}"):
+        for raw in (payload, f"```json\n{payload}\n```", f"Tips: {payload}", f'{{"tips": {payload}}}', f'{{"n": 3, "advice": {payload}}}'):
             self.assertEqual(parsing.parse_tips(raw), json.loads(payload))
         for raw in ('{}', '["one"]', '["one", null, "three"]', '["one", " ", "three"]'):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
@@ -338,6 +338,11 @@ class JevConversationTests(SessionTestCase):
              patch.object(main, "sarvam_llm", fake_llm()) as llm:
             await main.process_user_message("legacy", "I'm sorry")
         actor_call, coach_call = llm.call_args_list
+        # The actor runs on the conversational model with reasoning off; the coach on the reasoning model.
+        self.assertEqual(actor_call.kwargs["model"], "sarvam-105b-conversations")
+        self.assertIsNone(actor_call.kwargs.get("reasoning"))
+        self.assertNotIn("model", coach_call.kwargs)
+        self.assertEqual(coach_call.kwargs["reasoning"], "low")
         actor_messages = actor_call.args[0]
         self.assertIn("after hearing this", actor_messages[-1]["content"])
         self.assertIn("receptiveness: 70/100", actor_messages[-1]["content"])
